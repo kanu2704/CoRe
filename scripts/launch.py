@@ -139,6 +139,7 @@ def main():
                     continue
             cmd += args.extra
             env = dict(os.environ)
+            env['PYTHONUNBUFFERED'] = '1'  # progress lines reach stdout.log immediately (tail -f works)
             if gpu is not None:
                 env['CUDA_VISIBLE_DEVICES'] = gpu
             run_dir = os.path.join(out, '_smoke' if args.plan in SMOKE_SETTINGS else '', task, mode, f'seed{seed}')
