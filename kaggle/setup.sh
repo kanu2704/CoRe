@@ -28,9 +28,10 @@ if [ -n "$NV_EGL" ]; then
   [ -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ] || \
     printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s"}}\n' "$NV_EGL" > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
   echo "NVIDIA EGL registered: $NV_EGL"
-elif command -v nvidia-smi >/dev/null; then
-  echo "note: NVIDIA's EGL library is missing, so MuJoCo would render on the CPU (slow)."
-  echo "      Run: bash kaggle/fix_gpu_render.sh"
+elif command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
+  echo "NVIDIA's EGL library is missing (MuJoCo would render on the CPU): installing it..."
+  bash kaggle/fix_gpu_render.sh 2>&1 | grep -v "is not a symbolic link" | grep -v '^$' || \
+    echo "note: GPU rendering fix failed; check_setup.py --render will show the renderer"
 fi
 
 echo "$PY" > "${PSVM_PY_FILE:-/tmp/psvm_python}"

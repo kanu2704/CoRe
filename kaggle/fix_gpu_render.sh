@@ -27,7 +27,7 @@ if [ ! -e "$LIBDIR/libEGL_nvidia.so.$VER" ]; then
   done
   echo "copied $n NVIDIA graphics libraries"
   ln -sf "$LIBDIR/libEGL_nvidia.so.$VER" "$LIBDIR/libEGL_nvidia.so.0"
-  ldconfig
+  ldconfig 2>/dev/null || true
 fi
 
 mkdir -p /usr/share/glvnd/egl_vendor.d
