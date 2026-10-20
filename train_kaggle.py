@@ -544,7 +544,7 @@ def main():
         print(f"already finished: {run_dir}")
         return
     if os.path.exists(run_dir):
-        for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json'):
+        for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json', 'done.json'):
             if os.path.exists(os.path.join(run_dir, name)):
                 os.remove(os.path.join(run_dir, name))
     os.makedirs(run_dir, exist_ok=True)
