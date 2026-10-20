@@ -85,6 +85,8 @@ class Generator:
                 try:
                     for (_, _, fut), res in zip(group, self._generate(group)):
                         fut.set_result(res)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()  # give memory back (a training run may share this GPU)
                 except Exception as e:  # e.g. out of memory: answer each request in the group with the error
                     for _, _, fut in group:
                         fut.set_exception(e)

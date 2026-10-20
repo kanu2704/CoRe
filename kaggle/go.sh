@@ -13,7 +13,7 @@ EXTRA=()
 NGPU=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 if [ "${PSVM_VLM:-local}" != "gemini" ] && [ "${NGPU:-0}" -ge 2 ]; then
   bash kaggle/start_vlm.sh
-  EXTRA=(--vlm_workers 4)
+  EXTRA=(--vlm_workers 8)
 fi
 source kaggle/env.sh >/dev/null
 if [ -z "${VLM_API_KEY:-}" ]; then

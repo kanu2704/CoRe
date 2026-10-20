@@ -10,12 +10,21 @@ from FRM.file_process import file_to_string
 import json
 import threading
 
+_client_count = {}
+
+
 def make_client(role='llm'):
     """OpenAI-compatible client. VLM_* / LLM_* environment variables (key, base URL)
-    fall back to the original MY_API_KEY and OPENAI_BASE_URL."""
+    fall back to the original MY_API_KEY and OPENAI_BASE_URL. A comma-separated base URL
+    (several local model servers) is shared round-robin among the clients that get created."""
     prefix = 'VLM' if role == 'vlm' else 'LLM'
     key = os.environ.get(f'{prefix}_API_KEY') or os.environ.get('MY_API_KEY')
     base_url = os.environ.get(f'{prefix}_BASE_URL') or os.environ.get('OPENAI_BASE_URL')
+    if base_url and ',' in base_url:
+        urls = [u.strip() for u in base_url.split(',') if u.strip()]
+        i = _client_count.get(role, 0)
+        _client_count[role] = i + 1
+        base_url = urls[i % len(urls)]
     if not key:
         raise RuntimeError(f"No API key for the {prefix}: set {prefix}_API_KEY (or MY_API_KEY)")
     return OpenAI(api_key=key, base_url=base_url) if base_url else OpenAI(api_key=key)
