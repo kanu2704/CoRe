@@ -16,3 +16,19 @@ for ev in "$WORK"/runs/*/*/seed*/events.jsonl; do
   last="$(grep rrm_update "$ev" | tail -1)"
   [ -n "$last" ] && echo "$(basename "$(dirname "$d")") $(basename "$d"): $last"
 done
+# overall agreement of the VLM's labels with the true preference, over all label rounds so far
+for ev in "$WORK"/runs/*/*/seed*/events.jsonl; do
+  [ -f "$ev" ] || continue
+  "$PY" - "$ev" <<'PYEOF'
+import json, sys, os
+rows = [json.loads(l) for l in open(sys.argv[1]) if '"rrm_update"' in l]
+n = c = 0
+for r in rows:
+    k = r['labeled'] - n
+    c += r['vlm_acc'] * k
+    n = r['labeled']
+if n:
+    run = os.path.relpath(os.path.dirname(sys.argv[1]), os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(sys.argv[1])))))
+    print(f"{run}: Gemini agreement so far {100 * c / n:.0f}% over {n} labels ({len(rows)} rounds)")
+PYEOF
+done
