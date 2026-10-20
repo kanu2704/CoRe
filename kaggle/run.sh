@@ -21,6 +21,11 @@ if [ -z "${SESSION_HOURS:-}" ]; then
 fi
 
 GPUS=$("$PY" -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 0)
+
+# frames on the big local disk if there is room (lossless, faster than PNG, ~4 GB RAM per run)
+if [ -z "${PSVM_FRAME_BACKEND:-}" ] && [ "$(df -BG --output=avail /tmp 2>/dev/null | tail -1 | tr -dc 0-9)" -gt 150 ] 2>/dev/null; then
+  export PSVM_FRAME_BACKEND=disk PSVM_DISK_DIR=/tmp/psvm_frames
+fi
 if [ "$GPUS" -gt 0 ]; then
   DEFAULTS=(--gpus 0 --parallel 1 --threads 4)
 else

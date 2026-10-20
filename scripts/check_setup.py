@@ -81,6 +81,12 @@ def main():
         ok = all(np.array_equal(decode_png(b), f) for b, f in zip(blobs, frames))
         dec_ms = (time.time() - t0) / 50 * 1e3
         kb = np.mean([len(b) for b in blobs]) / 1e3
+        from psvm.compat import gl_renderer
+        renderer = gl_renderer() or 'unknown'
+        print(f"OpenGL renderer: {renderer}")
+        if render_ms > 20 or 'llvmpipe' in renderer.lower() or 'softpipe' in renderer.lower():
+            print(f"  WARNING: software (CPU) rendering, {render_ms:.0f} ms/frame -> ~{render_ms * 500000 / 3.6e6:.0f} h of "
+                  f"rendering per Phase 2 run. Run: bash kaggle/fix_gpu_render.sh  (then this check again)")
         print(f"rendering ({os.environ['MUJOCO_GL']}): {render_ms:.1f} ms/frame; PNG {kb:.0f} KB/frame "
               f"({270 / kb:.1f}x smaller), encode {enc_ms:.1f} ms, decode {dec_ms:.1f} ms, lossless={ok}")
         # Phase 2 peak: replay frames up to the last RRM update (~116k steps) + RRM episode frames (100 x 500)
@@ -92,6 +98,10 @@ def main():
         if avail:
             fit = int(avail // est_png)
             print(f"-> about {fit} Phase 2 run(s) fit in this machine's available RAM at once")
+        tmp_free = shutil.disk_usage('/tmp').free / 1e9 if os.path.exists('/tmp') else 0
+        if tmp_free > 150:
+            print(f"/tmp has {tmp_free:.0f} GB free: kaggle/run.sh stores frames there (--frame_backend disk, "
+                  f"~50 GB per run, ~4 GB RAM), which is faster than PNG in RAM")
 
     if args.api:
         from FRM.code_agent import make_client

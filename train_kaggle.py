@@ -405,7 +405,12 @@ class Run:
 
             frame, r_rrm = None, 0.0
             if self.phase2:
+                t_render = time.time()
                 rgb = render_frame(self.env, self.task, cfg['image_size'])
+                if self.step == 0:
+                    from psvm.compat import gl_renderer
+                    self.write('events', step=0, event='renderer', renderer=gl_renderer(),
+                               first_frame_ms=(time.time() - t_render) * 1e3)
                 frame = Frame(rgb, args.png_level)
                 if self.step >= warmup:
                     r_rrm = self.rrm_reward(rgb)
@@ -502,7 +507,7 @@ def main():
     p.add_argument('--llm_model', default=os.environ.get('LLM_MODEL', 'gpt-4.1-mini'))
     p.add_argument('--no_llm_refine', dest='llm_refine', action='store_false',
                    help="core mode without LLM refinement (initial FRM + RRM; not the paper's CoRe)")
-    p.add_argument('--frame_backend', default='png', choices=['ram', 'png', 'disk'],
+    p.add_argument('--frame_backend', default=os.environ.get('PSVM_FRAME_BACKEND', 'png'), choices=['ram', 'png', 'disk'],
                    help="image storage: png/disk are lossless and save RAM; ram = original")
     p.add_argument('--png_level', type=int, default=1)
     p.add_argument('--save_label_images', action='store_true', help="keep images in saved label files (large)")

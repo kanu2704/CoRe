@@ -56,6 +56,17 @@ def step_env(env, action):
     return out
 
 
+def gl_renderer():
+    """Name of the OpenGL renderer of the current context, e.g. 'Tesla T4/PCIe/SSE2' (GPU)
+    or 'llvmpipe ...' (software). Call right after env.render(); None if unknown."""
+    try:
+        from OpenGL import GL
+        name = GL.glGetString(GL.GL_RENDERER)
+        return name.decode() if isinstance(name, bytes) else str(name)
+    except Exception:
+        return None
+
+
 SCRIPTED_POLICIES = {
     'peg-insert-side-v2': 'SawyerPegInsertionSideV2Policy',
     'hammer-v2': 'SawyerHammerV2Policy',
