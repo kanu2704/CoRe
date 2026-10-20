@@ -681,7 +681,10 @@ class RewardModel:
                 member_loss = CE_loss + KL_loss  # batch mean loss
                 ensemble_kl_losses[member] += KL_loss.item()
  
-                total_loss += member_loss
+                # backward per member: the members share no parameters, so the gradients are identical
+                # to one backward of the summed loss, but only one member's activations are in memory
+                member_loss.backward()
+                total_loss += member_loss.item()
 
                 # compute acc and loss
                 _, predicted = torch.max(r_hat_ce.data, 1)
@@ -689,7 +692,6 @@ class RewardModel:
 
                 ensemble_acc[member] += correct
                 ensemble_losses[member] += member_loss.item()
-            total_loss.backward()
             self.opt.step()
         # acc is the sum of all epoch samples
         ensemble_acc = ensemble_acc / total
