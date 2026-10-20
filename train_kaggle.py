@@ -27,6 +27,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from collections import defaultdict, deque
@@ -556,6 +557,8 @@ def main():
         for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json', 'done.json'):
             if os.path.exists(os.path.join(run_dir, name)):
                 os.remove(os.path.join(run_dir, name))
+        for name in ('vlm_output', 'vlm_label_set', 'models'):  # leftovers of an earlier attempt
+            shutil.rmtree(os.path.join(run_dir, name), ignore_errors=True)
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, 'config.json'), 'w') as f:
         json.dump(dict(args=vars(args), cfg=cfg, vlm_model=os.environ.get('VLM_MODEL'),
