@@ -8,7 +8,7 @@ HARD_TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2']
 
 PHASE1_MAIN = ['env_dense', 'env_sparse', 'frm', 'svm']          # A1-A4
 PHASE1_EXTRA = ['svm_sparse', 'svm_seeded']                       # A5, A6
-PHASE2_MAIN = ['core', 'rrm_only', 'rrm_svm']                     # B1, B2, B4
+PHASE2_MAIN = ['rrm_svm', 'rrm_only', 'core']                     # B4 (the proposal) first, then B2, B1
 PHASE2_CONTROL = ['rrm_sparse']                                   # B3
 
 
