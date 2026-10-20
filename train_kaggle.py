@@ -201,6 +201,7 @@ class Run:
         self.labeled_feedback = 0
         self.svm_on_step = None
         self.first_success_step = None
+        self.frm_refine_failures = 0
         self.start = time.time()
 
     # ------------------------------------------------------------------ logging
@@ -469,13 +470,20 @@ class Run:
             md.setdefault(k, []).append(round(v, 2))
         if self.step % self.cfg['FRM_align_step'] == 0:
             freq = max(int(len(md["socre"]) // 10), 1)
-            rf = self.frm_gen.FRM_generate(episode_freq=freq, cur_frm=self.frm)
+            try:
+                rf = self.frm_gen.FRM_generate(episode_freq=freq, cur_frm=self.frm)
+            except (Exception, SystemExit) as e:
+                # LLM unavailable (e.g. quota): keep the current formal reward and keep training
+                self.frm_refine_failures += 1
+                self.write('events', step=self.step, event='frm_refine_failed', reason=str(e)[:300])
+                print(f"[frm] refinement failed, keeping the current formal reward: {str(e)[:200]}")
+                return
             if rf is not None:
                 self.frm = rf
                 self.replay.relabel_with_rf(self.frm, target_pos(self.env), self.step)
             self.write('events', step=self.step, event='frm_refine', improved=rf is not None)
 
-    def close(self, timed_out):
+    def close(self, timed_out, reason=None):
         model_dir = os.path.join(self.run_dir, 'models')
         os.makedirs(model_dir, exist_ok=True)
         self.agent.save(model_dir, self.step)
@@ -486,7 +494,8 @@ class Run:
         summary = dict(mode=self.mode, task=self.task, seed=self.args.seed, steps=self.step,
                        complete=not timed_out, hours=(time.time() - self.start) / 3600,
                        first_success_step=self.first_success_step, svm_on_step=self.svm_on_step,
-                       labeled_feedback=self.labeled_feedback, peak_rss_gb=rss_gb())
+                       labeled_feedback=self.labeled_feedback, peak_rss_gb=rss_gb(),
+                       frm_refine_failures=self.frm_refine_failures, stop_reason=reason)
         with open(os.path.join(self.run_dir, 'done.json' if not timed_out else 'incomplete.json'), 'w') as f:
             json.dump(summary, f, indent=2)
         for f in self.files.values():
@@ -568,9 +577,16 @@ def main():
     os.chdir(run_dir)  # CoRe writes VLM/LLM files relative to the working directory
 
     try:
+        from FRM.code_agent import DailyQuotaError
         run = Run(args, cfg, run_dir)
-        timed_out = run.run()
-        run.close(timed_out)
+        try:
+            timed_out, reason = run.run(), None
+        except DailyQuotaError as e:
+            # the VLM key's daily quota is used up: no more labels today, stop cleanly (marked incomplete)
+            print(f"[stop] {e}")
+            run.write('events', step=run.step, event='vlm_daily_quota', reason=str(e)[:300])
+            timed_out, reason = True, 'VLM daily quota used up; restart after the quota resets'
+        run.close(timed_out, reason)
     finally:
         if os.path.exists(lock):
             os.remove(lock)

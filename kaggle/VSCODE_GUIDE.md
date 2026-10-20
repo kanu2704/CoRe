@@ -135,6 +135,14 @@ More launcher options:
 - `--only seed=0` picks particular runs.
 - Runs are done seed by seed, so stopping early still leaves complete sets for comparison.
 
+## Labels from a free Qwen model (default on GPU T4 x2)
+
+Gemini's free tier allows 500 Flash-Lite requests per day, and one Phase 2 run needs ~1,000. So on a
+two-GPU session `go.sh` first starts **Qwen3-VL-4B-Instruct** from Hugging Face on the second T4
+(`kaggle/start_vlm.sh`, log in `/tmp/vlm_server.log`), and the image reward model's labels come from it:
+free, no daily limit. CoRe's reward-code rewriting (~16 calls per `core` run) still uses Gemini Flash-Lite.
+Use the same labelling model for every Phase 2 run. To use Gemini for labels instead: `PSVM_VLM=gemini bash kaggle/go.sh`.
+
 ## 6. Save results before the session ends
 
 ```bash

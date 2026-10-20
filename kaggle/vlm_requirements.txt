@@ -1,0 +1,8 @@
+# Local Qwen VLM server (kaggle/vlm_server.py), installed in its own environment
+# (newer PyTorch than the training environment; transformers 5 needs torch >= 2.6).
+torch==2.6.0
+torchvision==0.21.0
+transformers==5.20.2
+accelerate
+bitsandbytes
+pillow

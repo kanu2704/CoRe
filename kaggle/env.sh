@@ -16,11 +16,16 @@ if [ -z "${VLM_API_KEY:-}" ] && command -v python3 >/dev/null; then
   unset _k
 fi
 
+# a local Qwen VLM started by kaggle/start_vlm.sh replaces Gemini for the labels (VLM role only)
+if [ -f /tmp/psvm_local_vlm.env ] && [ "${PSVM_VLM:-local}" != "gemini" ]; then
+  set -a; . /tmp/psvm_local_vlm.env; set +a
+fi
+
 # defaults (free Gemini key for both roles)
 export VLM_BASE_URL="${VLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}"
 export VLM_MODEL="${VLM_MODEL:-gemini-3.5-flash-lite}"
 export LLM_BASE_URL="${LLM_BASE_URL:-$VLM_BASE_URL}"
-export LLM_MODEL="${LLM_MODEL:-gemini-3.8-flash}"
+export LLM_MODEL="${LLM_MODEL:-gemini-3.5-flash-lite}"
 export LLM_API_KEY="${LLM_API_KEY:-${VLM_API_KEY:-}}"
 
 PY="$(cat "${PSVM_PY_FILE:-/tmp/psvm_python}" 2>/dev/null || true)"

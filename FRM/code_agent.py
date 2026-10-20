@@ -38,6 +38,15 @@ def pace(role):
         time.sleep(slot - now)
 
 
+class DailyQuotaError(RuntimeError):
+    """The key's daily quota for this model is used up; retrying today is pointless."""
+
+
+def is_daily_quota(e):
+    msg = str(e)
+    return 'PerDay' in msg or 'per day' in msg.lower()
+
+
 def is_rate_limit(e):
     msg = str(e).lower()
     return getattr(e, 'status_code', None) == 429 or any(k in msg for k in ('429', 'rate limit', 'quota', 'resource_exhausted', 'too many requests'))
@@ -151,6 +160,8 @@ class Agent():
                     total_samples += once_sample_num
                     break
                 except Exception as e:
+                    if is_daily_quota(e):
+                        raise DailyQuotaError(f"{self.model_type}: daily quota used up. {str(e)[:300]}") from e
                     if attempt >= 10:
                         # some OpenAI-compatible APIs reject n > 1: fall back to fewer samples per call
                         once_sample_num = 1 if attempt >= 15 else max(int(sample_num / 2), 1)

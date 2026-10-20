@@ -9,7 +9,7 @@ import cv2
 from PIL import Image
 from io import BytesIO
 import numpy as np
-from FRM.code_agent import Agent, make_client
+from FRM.code_agent import Agent, make_client, DailyQuotaError
 import os
 import re
 from scipy.interpolate import interp1d
@@ -250,6 +250,8 @@ class PreAgent(Agent):
                 success = True
                 
             except Exception as e:
+                if isinstance(e, DailyQuotaError):
+                    raise  # no labels are possible until the quota resets: let the run stop cleanly
                 print(f"failed. Error: {str(e)} \n \n{model_type} attempt {try_cnt + 1}")
                 time.sleep(1)
                 try_cnt += 1

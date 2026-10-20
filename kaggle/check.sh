@@ -29,6 +29,6 @@ for r in rows:
     n = r['labeled']
 if n:
     run = os.path.relpath(os.path.dirname(sys.argv[1]), os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(sys.argv[1])))))
-    print(f"{run}: Gemini agreement so far {100 * c / n:.0f}% over {n} labels ({len(rows)} rounds)")
+    print(f"{run}: VLM label agreement so far {100 * c / n:.0f}% over {n} labels ({len(rows)} rounds)")
 PYEOF
 done
