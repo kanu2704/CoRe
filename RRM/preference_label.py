@@ -19,6 +19,17 @@ model_type = os.environ.get('VLM_MODEL', "gemini-2.5-flash-lite")
 # set PSVM_SAVE_VLM_VIDEOS=0 to skip the per-query .mp4 renders (saves disk on Kaggle)
 SAVE_VLM_VIDEOS = os.environ.get('PSVM_SAVE_VLM_VIDEOS', '1') == '1'
 
+def parse_decision(response):
+    """The first standalone A, B or -1 after '#decision#'. The original check ('A' anywhere on the
+    rest of the line, before looking for B) misreads answers such as
+    '#decision#: B #evaluate task completion ...#: A: [...] B: [...]' as A."""
+    m = re.search(r"#decision#\W*(-1|A|B)(?![A-Za-z0-9])", response)
+    if m is None:
+        line = re.search(r"#decision#([^\n]*)", response)
+        m = re.search(r"(?<![A-Za-z0-9])(-1|A|B)(?![A-Za-z0-9])", line.group(1)) if line else None
+    return m.group(1) if m else None
+
+
 def get_n_indices(length, k):
     return [int(round(i)) for i in np.linspace(0, length - 1, k)]
 
@@ -192,17 +203,16 @@ class PreAgent(Agent):
 
     def extract_answer(self, response):
 
-        decision_match = re.search(r"#decision#:\s*(.+)", response)
-        decision = decision_match.group(1).strip() if decision_match else None
+        decision = parse_decision(response)
 
         important_weight = self.get_important_weight(response)
         weight_a, weight_b = important_weight['A'], important_weight['B']
 
-        if "-1" in decision:
+        if decision == "-1":
             return -1, None, None
-        elif "A" in decision:
+        elif decision == "A":
             return 0, weight_a, weight_b
-        elif "B" in decision:
+        elif decision == "B":
             return 1, weight_a, weight_b
         else:
             raise ValueError("Extract answer error!")
