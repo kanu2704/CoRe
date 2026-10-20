@@ -7,12 +7,18 @@ import random
 import math
 import metaworld
 import metaworld.envs.mujoco.env_dict as _env_dict
-from moviepy.editor import ImageSequenceClip
+try:
+    from moviepy.editor import ImageSequenceClip
+except ImportError:  # only needed for saving videos
+    ImageSequenceClip = None
 from collections import deque
 from gym.wrappers.time_limit import TimeLimit
 from rlkit.envs.wrappers import NormalizedBoxEnv
 from collections import deque
-from skimage.util.shape import view_as_windows
+try:
+    from skimage.util.shape import view_as_windows
+except ImportError:  # not used by the MetaWorld pipeline
+    view_as_windows = None
 from torch import nn
 from torch import distributions as pyd
 import cv2

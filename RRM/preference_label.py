@@ -9,14 +9,15 @@ import cv2
 from PIL import Image
 from io import BytesIO
 import numpy as np
-from FRM.code_agent import Agent
+from FRM.code_agent import Agent, make_client
 import os
 import re
 from scipy.interpolate import interp1d
 from RRM.prompt import env_goal_prompts
 
-model_type = "gemini-2.5-flash-lite"
-api_key = os.environ['MY_API_KEY']
+model_type = os.environ.get('VLM_MODEL', "gemini-2.5-flash-lite")
+# set PSVM_SAVE_VLM_VIDEOS=0 to skip the per-query .mp4 renders (saves disk on Kaggle)
+SAVE_VLM_VIDEOS = os.environ.get('PSVM_SAVE_VLM_VIDEOS', '1') == '1'
 
 def get_n_indices(length, k):
     return [int(round(i)) for i in np.linspace(0, length - 1, k)]
@@ -115,7 +116,7 @@ def save_render_videos(recorded_frames, output_dir, time_string, index, label):
 class PreAgent(Agent):
 
     def __init__(self, env_name, segment_size, project_dir='./'):
-        super().__init__(None, model_type, temperature=0)
+        super().__init__(None, model_type, temperature=0, role='vlm')
 
         self.project_dir = project_dir
         self.env_name = env_name
@@ -125,9 +126,7 @@ class PreAgent(Agent):
         self.goal_rgb_image = np_to_base64_image(self.load_goal_image())
 
     def recreate_client(self):
-        return OpenAI(
-            api_key=api_key,
-        )
+        return make_client('vlm')
     
     def load_goal_image(self):
         print(f'{self.project_dir}/goal_image/{self.env_name}-done.jpg')
@@ -257,8 +256,9 @@ class PreAgent(Agent):
         elif label == -1 and success:
             print(f"### Unuseful label:{label} ###")
 
-        render_frames = create_render_video(img_t_1, img_t_2, query_img_t_1, query_img_t_2, idx, label, weight_a, weight_b, resize=(300, 300))
-        save_render_videos(render_frames, output_video_dir, time_string, idx, label)
+        if SAVE_VLM_VIDEOS:
+            render_frames = create_render_video(img_t_1, img_t_2, query_img_t_1, query_img_t_2, idx, label, weight_a, weight_b, resize=(300, 300))
+            save_render_videos(render_frames, output_video_dir, time_string, idx, label)
 
         if label != -1:
             try:

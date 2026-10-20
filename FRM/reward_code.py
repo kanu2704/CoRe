@@ -25,12 +25,13 @@ task_description_prompts = {
 
 
 class FRMCode:
-    def __init__(self, cfg, project_dir, work_dir, RRM_reward, sample_num=4, once_sample_num=4, llm_model='gpt-4.1-mini'):
+    def __init__(self, cfg, project_dir, work_dir, RRM_reward, sample_num=4, once_sample_num=4, llm_model='gpt-4.1-mini',
+                 patch_env_source=True):
         self.cfg = cfg
         self.project_dir = project_dir
         self.work_dir = work_dir
         self.RRM_reward = RRM_reward
-        if "metaworld" in cfg.env:
+        if patch_env_source and "metaworld" in cfg.env:
             task_mujoco_code_path = f'{project_dir}/metaworld/envs/mujoco/sawyer_xyz/v2/{self.cfg.env.replace("metaworld", "sawyer").replace("-", "_").lower()}.py'
             if "sweep" in self.cfg.env:
                 task_mujoco_code_path = f'{project_dir}/metaworld/envs/mujoco/sawyer_xyz/v2/sawyer_sweep_into_goal_v2.py'

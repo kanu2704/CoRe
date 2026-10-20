@@ -15,10 +15,13 @@ import pickle as pkl
 import random
 import cv2
 import warnings
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from RRM.preference_label import PreAgent
 from RRM.conv_net import CNN, fanin_init
+from psvm.frames import FrameArray
 
-device = 'cuda'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 def gen_image_net(image_height, image_width, 
@@ -88,6 +91,12 @@ class RewardModel:
                 conv_strides=[3, 2, 2, 2],
                 cached_label_path=None,
                 kl_weight=5, 
+                # storage / labelling options (defaults reproduce the original code)
+                frame_backend='ram',
+                png_level=1,
+                label_source='vlm',       # 'vlm' (paper) or 'scripted' (true preference, free, for testing)
+                vlm_workers=1,            # parallel VLM queries per feedback session
+                save_label_images=True,   # include images in the saved label .pkl files
                 **kwargs
                 ):
         
@@ -101,8 +110,16 @@ class RewardModel:
         self.max_size = max_size
         self.capacity = int(capacity)
 
-        self.buffer_seg1 = np.empty((self.capacity, size_segment, image_height, image_width, 3), dtype=np.uint8)
-        self.buffer_seg2 = np.empty((self.capacity, size_segment, image_height, image_width, 3), dtype=np.uint8)
+        self.frame_backend = frame_backend
+        self.png_level = png_level
+        self.label_source = label_source
+        self.vlm_workers = max(1, int(vlm_workers))
+        self.save_label_images = save_label_images
+        # labelled segments, frame index = buffer_index * size_segment + t
+        self.buffer_seg1 = FrameArray(self.capacity * size_segment, image_height, image_width,
+                                      backend=frame_backend, png_level=png_level, name='seg1')
+        self.buffer_seg2 = FrameArray(self.capacity * size_segment, image_height, image_width,
+                                      backend=frame_backend, png_level=png_level, name='seg2')
         self.image_height = image_height
         self.image_width = image_width
         self.resize_factor = resize_factor
@@ -182,10 +199,13 @@ class RewardModel:
         self.inputs = np.empty((max_size, episode_length, self.ds + self.da), dtype=np.float32) # max_episode, episode_max_step, state
         self.targets = np.empty((max_size, episode_length, 1), dtype=np.float32)
 
+        # recent episodes' frames, frame index = episode * episode_length + step
         if "Rope" in self.env_name or "Water" in self.env_name:
-            self.img_inputs = np.empty((max_size, episode_length, 720, 720, 3), dtype=np.uint8)
+            self.img_inputs = FrameArray(max_size * episode_length, 720, 720, backend=frame_backend,
+                                         png_level=png_level, name='episodes')
         else:
-            self.img_inputs = np.empty((max_size, episode_length, image_height, image_width, 3), dtype=np.uint8)
+            self.img_inputs = FrameArray(max_size * episode_length, image_height, image_width,
+                                         backend=frame_backend, png_level=png_level, name='episodes')
             
         self.buffer_pre_idx = 0
         self.buffer_pre_full = False
@@ -197,7 +217,8 @@ class RewardModel:
         self.label_save_path = os.path.join(self.logdir, f"vlm_label_set")
         if not os.path.exists(self.label_save_path):
             os.makedirs(self.label_save_path)
-        self.client = PreAgent(self.env_name, size_segment, project_dir=self.dir_path)
+        self.client = PreAgent(self.env_name, size_segment, project_dir=self.dir_path) if label_source == 'vlm' else None
+        self._client_pool = None
        
         self.kl_weight = kl_weight 
 
@@ -243,13 +264,11 @@ class RewardModel:
     def add_data(self, obs, act, rew, done, img=None):
         sa_t = np.concatenate([obs, act], axis=-1)
         r_t = np.array(rew)
-        if img is not None:
-            flat_img = img.reshape(1, img.shape[0], img.shape[1], img.shape[2])
 
         np.copyto(self.inputs[self.buffer_pre_idx, self.buffer_pre_step_idx], sa_t)
         np.copyto(self.targets[self.buffer_pre_idx, self.buffer_pre_step_idx], r_t)
         if img is not None:
-            np.copyto(self.img_inputs[self.buffer_pre_idx, self.buffer_pre_step_idx], flat_img)
+            self.img_inputs.put(self.buffer_pre_idx * self.episode_length + self.buffer_pre_step_idx, img)
         self.buffer_pre_step_idx += 1
         if done:
             self.buffer_pre_step_idx = 0
@@ -298,7 +317,6 @@ class RewardModel:
         # get train traj
         train_inputs = np.asarray(self.inputs[:max_len])
         train_targets = np.asarray(self.targets[:max_len])
-        train_images = np.asarray(self.img_inputs[:max_len])
 
         
         # choose random episode
@@ -322,26 +340,30 @@ class RewardModel:
         sa_t_2 = train_inputs[batch_index_2[:, None], time_index_2]  # mb_size, size_segment, dim of s&a
         r_t_2 = train_targets[batch_index_2[:, None], time_index_2]
  
-        img_t_1 = train_images[batch_index_1[:, None], time_index_1]
-        img_t_2 = train_images[batch_index_2[:, None], time_index_2]  # bath x segment x image_height x image_width x3
+        img_t_1 = self.img_inputs.take(batch_index_1[:, None] * self.episode_length + time_index_1)
+        img_t_2 = self.img_inputs.take(batch_index_2[:, None] * self.episode_length + time_index_2)  # bath x segment x image_height x image_width x3
         
         return sa_t_1, sa_t_2, r_t_1, r_t_2, img_t_1, img_t_2
+
+    def _seg_frames(self, positions):
+        """Frame indices of the labelled segments stored at `positions`."""
+        return np.asarray(positions)[:, None] * self.size_segment + np.arange(self.size_segment)[None, :]
 
     def put_queries(self, sa_t_1, sa_t_2, labels, frm_1, frm_2, vlm_weights): # frm_1 data for reward check
         total_sample = sa_t_1.shape[0]
         next_index = self.buffer_index + total_sample
 
         # NOTE: When not using image based rewards, it gives concatenated state action pairs. When image based rewards are used, it gives the images.
+        seg_shape = (total_sample, self.size_segment) + tuple(sa_t_1.shape[-3:])
+        positions = (self.buffer_index + np.arange(total_sample)) % self.capacity
+        self.buffer_seg1.put_many(self._seg_frames(positions), sa_t_1.reshape(seg_shape))
+        self.buffer_seg2.put_many(self._seg_frames(positions), sa_t_2.reshape(seg_shape))
+
         if next_index >= self.capacity:
             print("WARNING! label buffer full!")
             self.buffer_full = True
             maximum_index = self.capacity - self.buffer_index
-            
-            sa_t_1 = sa_t_1.reshape(sa_t_1.shape[0], self.size_segment, sa_t_1.shape[2], sa_t_1.shape[3], sa_t_1.shape[4])
-            sa_t_2 = sa_t_2.reshape(sa_t_2.shape[0], self.size_segment, sa_t_2.shape[2], sa_t_2.shape[3], sa_t_2.shape[4])
 
-            np.copyto(self.buffer_seg1[self.buffer_index:self.capacity], sa_t_1[:maximum_index])
-            np.copyto(self.buffer_seg2[self.buffer_index:self.capacity], sa_t_2[:maximum_index])
             np.copyto(self.buffer_label[self.buffer_index:self.capacity], labels[:maximum_index])
 
             np.copyto(self.buffer_frm1[self.buffer_index:self.capacity], frm_1[:maximum_index])
@@ -352,8 +374,6 @@ class RewardModel:
 
             remain = total_sample - (maximum_index)
             if remain > 0:
-                np.copyto(self.buffer_seg1[0:remain], sa_t_1[maximum_index:])
-                np.copyto(self.buffer_seg2[0:remain], sa_t_2[maximum_index:])
                 np.copyto(self.buffer_label[0:remain], labels[maximum_index:])
 
                 np.copyto(self.buffer_frm1[:remain], frm_1[maximum_index:])
@@ -364,14 +384,6 @@ class RewardModel:
 
             self.buffer_index = remain
         else:
-            if self.size_segment > 1:
-                sa_t_1 = sa_t_1.reshape(sa_t_1.shape[0], self.size_segment, sa_t_1.shape[2], sa_t_1.shape[3], sa_t_1.shape[4])
-                sa_t_2 = sa_t_2.reshape(sa_t_2.shape[0], self.size_segment, sa_t_2.shape[2], sa_t_2.shape[3], sa_t_2.shape[4])
-            else:
-                sa_t_1 = sa_t_1.reshape(sa_t_1.shape[0], 1, sa_t_1.shape[1], sa_t_1.shape[2], sa_t_1.shape[3])
-                sa_t_2 = sa_t_2.reshape(sa_t_2.shape[0], 1, sa_t_2.shape[1], sa_t_2.shape[2], sa_t_2.shape[3])
-            np.copyto(self.buffer_seg1[self.buffer_index:next_index], sa_t_1)
-            np.copyto(self.buffer_seg2[self.buffer_index:next_index], sa_t_2)
             np.copyto(self.buffer_label[self.buffer_index:next_index], labels)
             
             np.copyto(self.buffer_frm1[self.buffer_index:next_index], frm_1)
@@ -451,30 +463,18 @@ class RewardModel:
         start_time = time.time()
         time_string = datetime.datetime.fromtimestamp(start_time).strftime('%Y-%m-%d-%H-%M-%S')
 
-        print(f"Using online vlm labels for this query!")
-        vlm_labels = []
-        vlm_weights = []
-        for idx, (video1, video2) in enumerate(zip(img_t_1, img_t_2)):
-            print("Querying gemini: {}/{} cost time:{:.2f}".format(idx, len(labels), time.time() - start_time))
-            diff = 0
-            for idx_diff in range(len(video1)):
-                diff += np.linalg.norm(video1[idx_diff] - video2[idx_diff])
-            if diff < 1e-3 * len(video1):
-                print("Too similar, skip query!")
-                vlm_labels.append(-1)
-                vlm_weights.append([None, None])
-                continue
-            else:
-                label, vlm_weights_0, vlm_weights_1 = self.client.video_preference_label(video1, video2, time_string, idx)
-                vlm_labels.append(label)
-                vlm_weights.append([vlm_weights_0, vlm_weights_1])
+        if self.label_source == 'scripted':
+            vlm_labels, vlm_weights = self._scripted_labels(rational_labels, r_t_1, r_t_2)
+        else:
+            print(f"Using online vlm labels for this query!")
+            vlm_labels, vlm_weights = self._query_vlm(img_t_1, img_t_2, time_string, start_time)
         
         # remove the vlm label=-1
         sa_t_1, sa_t_2, r_t_1, r_t_2, rational_labels, vlm_labels, vlm_weights, img_t_1, img_t_2 = self.filter_useless_label(
             sa_t_1, sa_t_2, r_t_1, r_t_2, rational_labels, vlm_labels, vlm_weights, img_t_1, img_t_2
         )
 
-        combined_images_list = np.concatenate([img_t_1, img_t_2], axis=3)  # along image_width axis for save labels
+        combined_images_list = np.concatenate([img_t_1, img_t_2], axis=3) if self.save_label_images else None  # along image_width axis for save labels
         with open("{}/{}.pkl".format(self.label_save_path, time_string), "wb") as f:
             pkl.dump([combined_images_list, rational_labels, vlm_labels, vlm_weights, sa_t_1, sa_t_2, r_t_1, r_t_2], f, protocol=pkl.HIGHEST_PROTOCOL)
             
@@ -482,7 +482,7 @@ class RewardModel:
         acc = 0
         useful_label_num = len(rational_labels)
         if useful_label_num > 0:
-            acc = np.sum(vlm_labels == rational_labels) / useful_label_num
+            acc = np.sum(vlm_labels.reshape(-1) == rational_labels.reshape(-1)) / useful_label_num
             print("useful/query: {}/{} vlm label acc: {:.3f} ".format(useful_label_num, query_label_num, acc))
             print("useful/query: {}/{} vlm label acc: {:.3f} ".format(useful_label_num, query_label_num, acc))
         else:
@@ -493,6 +493,53 @@ class RewardModel:
 
         return sa_t_1, sa_t_2, r_t_1, r_t_2, img_t_1, img_t_2, rational_labels, vlm_labels, vlm_weights
 
+
+    def _scripted_labels(self, rational_labels, r_t_1, r_t_2):
+        """Testing mode: the true preference from the environment reward, and per-frame
+        weights from the dense reward (MetaWorld rewards are in [0, 10])."""
+        weights = []
+        for a, b in zip(r_t_1, r_t_2):
+            weights.append([np.clip(np.asarray(a, np.float64).reshape(-1) / 10.0, 1e-6, None),
+                            np.clip(np.asarray(b, np.float64).reshape(-1) / 10.0, 1e-6, None)])
+        return [int(l) for l in np.asarray(rational_labels).reshape(-1)], weights
+
+    def _query_one(self, client, idx, video1, video2, time_string):
+        diff = 0
+        for idx_diff in range(len(video1)):
+            diff += np.linalg.norm(video1[idx_diff] - video2[idx_diff])
+        if diff < 1e-3 * len(video1):
+            print("Too similar, skip query!")
+            return -1, [None, None]
+        label, vlm_weights_0, vlm_weights_1 = client.video_preference_label(video1, video2, time_string, idx)
+        return label, [vlm_weights_0, vlm_weights_1]
+
+    def _query_vlm(self, img_t_1, img_t_2, time_string, start_time):
+        pairs = list(zip(img_t_1, img_t_2))
+        if self.vlm_workers == 1:
+            results = []
+            for idx, (video1, video2) in enumerate(pairs):
+                print("Querying VLM: {}/{} cost time:{:.2f}".format(idx, len(pairs), time.time() - start_time))
+                results.append(self._query_one(self.client, idx, video1, video2, time_string))
+        else:
+            # each worker owns its own PreAgent (the conversation object is not thread-safe)
+            if self._client_pool is None:
+                self._client_pool = Queue()
+                self._client_pool.put(self.client)
+                for _ in range(self.vlm_workers - 1):
+                    self._client_pool.put(PreAgent(self.env_name, self.size_segment, project_dir=self.dir_path))
+
+            def work(item):
+                idx, (video1, video2) = item
+                client = self._client_pool.get()
+                try:
+                    return self._query_one(client, idx, video1, video2, time_string)
+                finally:
+                    self._client_pool.put(client)
+
+            with ThreadPoolExecutor(max_workers=self.vlm_workers) as pool:
+                results = list(pool.map(work, enumerate(pairs)))
+            print("Queried {} pairs with {} workers in {:.1f}s".format(len(pairs), self.vlm_workers, time.time() - start_time))
+        return [r[0] for r in results], [r[1] for r in results]
 
     def filter_useless_label(self, sa_t_1, sa_t_2, r_t_1, r_t_2, rational_labels, vlm_labels, vlm_weights, img_t_1, img_t_2):
         vlm_labels = np.array(vlm_labels)
@@ -591,8 +638,8 @@ class RewardModel:
                 
                 # get random batch
                 idxs = total_batch_index[member][iter_id*self.train_batch_size:last_index]
-                sa_t_1 = self.buffer_seg1[idxs]
-                sa_t_2 = self.buffer_seg2[idxs]
+                sa_t_1 = self.buffer_seg1.take(self._seg_frames(idxs))
+                sa_t_2 = self.buffer_seg2.take(self._seg_frames(idxs))
                 labels = self.buffer_label[idxs]
                 labels = torch.from_numpy(labels.flatten()).long().to(device)
                 if self.kl_weight != 0:
@@ -657,6 +704,8 @@ class RewardModel:
     
     def empty_preference_data(self):
 
+        for frames in (self.buffer_seg1, self.buffer_seg2, self.img_inputs):
+            frames.release()
         del self.buffer_seg1, self.buffer_seg2, self.buffer_label, self.buffer_score_1, self.buffer_score_2, self.buffer_frm1, self.buffer_frm2
         del self.inputs, self.targets
         del self.img_inputs

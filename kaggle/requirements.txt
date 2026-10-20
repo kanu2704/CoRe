@@ -1,0 +1,19 @@
+# Pinned so every Kaggle session, teammate account and laptop runs the same software.
+# CoRe's own pins: mujoco 3.1.1, gym 0.25.2, gymnasium 0.29.1, numpy 1.x.
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+mujoco==3.1.1
+gym==0.25.2
+gymnasium==0.29.1
+glfw
+imageio
+PyOpenGL
+opencv-python-headless
+openai>=1.40,<3
+termcolor
+tensorboard
+pyyaml
+scipy
+pillow
+matplotlib

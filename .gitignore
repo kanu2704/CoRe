@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+runs/
+runs_*/
+results/
+*.env
+!kaggle/keys.example.env
