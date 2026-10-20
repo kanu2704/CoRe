@@ -31,17 +31,12 @@ Kaggle browser tab just keeps the session alive.
 
 ---
 
-## 1. Upload the code (once, and again whenever you change it)
+## 1. The code lives on GitHub
 
-On your Mac, in the `CoRe` folder:
-
-```bash
-bash kaggle/make_upload_zip.sh
-```
-
-This writes `../CoRe_psvm_kaggle.zip` (~97 MB). On kaggle.com go to **Datasets → New Dataset**, upload the zip,
-keep it **Private**, and name it e.g. `core-psvm-code`. To update the code later, open the dataset and choose
-**New Version**.
+Our version of CoRe is the branch `psvm-kaggle` of your fork, `github.com/kanu2704/CoRe`.
+Kaggle downloads it with `git clone`, so nothing large goes through the tunnel. After changing code on your
+Mac, `git push`, then `git pull` on Kaggle. (The old upload-a-zip route via `kaggle/make_upload_zip.sh`
+still works as a fallback.)
 
 ## 2. Start the tunnel (each session, in the browser)
 
@@ -49,7 +44,7 @@ keep it **Private**, and name it e.g. `core-psvm-code`. To update the code later
 2. In the notebook's right-hand panel:
    - **Accelerator:** *GPU T4 x2* for Phase 2, *None* for Phase 1.
    - **Internet:** On.
-   - **Add Data → Your Datasets →** `core-psvm-code` (and later your `psvm-runs` results).
+   - **Add Data → Your Datasets →** your `psvm-runs` results (once you have some).
 3. Run the code cell. It prints a `github.com/login/device` link and a code. Open the link, enter the code, approve.
 4. **Leave the cell running and the tab open.** Stopping the cell closes the tunnel, and the session ends after 12 h at most.
 
@@ -63,11 +58,14 @@ keep it **Private**, and name it e.g. `core-psvm-code`. To update the code later
 ## 4. Set up the session (VS Code terminal, every session)
 
 ```bash
-bash "$(find /kaggle/input -path '*kaggle/start.sh' | head -1)"
+cd /kaggle/working && git clone --depth 1 -b psvm-kaggle https://github.com/kanu2704/CoRe.git
 ```
 
-This copies the code to `/kaggle/working/CoRe`, builds the pinned Python environment (~3 min), and merges any
-earlier results you attached.
+```bash
+bash /kaggle/working/CoRe/kaggle/start.sh
+```
+
+This builds the pinned Python environment (~3 min) and merges any earlier results you attached.
 
 **Your keys.** The Kaggle machine is wiped when a session ends, so add them each session:
 
@@ -177,7 +175,7 @@ other's `psvm-runs` results.
 
 | Symptom | Fix |
 |---|---|
-| `find` prints nothing | The code dataset isn't attached: Add Data in the notebook, then `ls /kaggle/input` |
+| `git clone` fails | Check Internet is On in the notebook settings |
 | `VLM ... (key MISSING)` | Fill `~/.psvm_keys.env`, then `source kaggle/env.sh` again |
 | Logs show 429 / "quota" errors | Normal pacing and backoff. If a run ends with "too many failed attempts", the daily quota is used up: wait for the reset |
 | Run killed, no error | Out of RAM: one Phase 2 run at a time (the default) |
