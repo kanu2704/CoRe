@@ -543,6 +543,15 @@ def main():
     if os.path.exists(os.path.join(run_dir, 'done.json')) and not args.overwrite:
         print(f"already finished: {run_dir}")
         return
+    lock = os.path.join(run_dir, 'running.pid')
+    if os.path.exists(lock):
+        try:
+            other = int(open(lock).read().strip())
+            os.kill(other, 0)  # raises if that process is gone
+            print(f"this run is already being trained by process {other}: {run_dir}")
+            return
+        except (ValueError, OSError):
+            pass  # stale lock from a run that died
     if os.path.exists(run_dir):
         for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json', 'done.json'):
             if os.path.exists(os.path.join(run_dir, name)):
@@ -551,11 +560,17 @@ def main():
     with open(os.path.join(run_dir, 'config.json'), 'w') as f:
         json.dump(dict(args=vars(args), cfg=cfg, vlm_model=os.environ.get('VLM_MODEL'),
                        torch=torch.__version__, cuda=torch.cuda.is_available()), f, indent=2)
+    with open(lock, 'w') as f:
+        f.write(str(os.getpid()))
     os.chdir(run_dir)  # CoRe writes VLM/LLM files relative to the working directory
 
-    run = Run(args, cfg, run_dir)
-    timed_out = run.run()
-    run.close(timed_out)
+    try:
+        run = Run(args, cfg, run_dir)
+        timed_out = run.run()
+        run.close(timed_out)
+    finally:
+        if os.path.exists(lock):
+            os.remove(lock)
 
 
 if __name__ == '__main__':
