@@ -2,6 +2,7 @@
 # Plain progress report:  bash kaggle/check.sh
 cd "$(dirname "$0")/.."
 source kaggle/env.sh >/dev/null
+PY="${PY:-python3}"  # works even if the session's Python environment in /tmp is gone
 WORK="${PSVM_WORK:-/kaggle/working}"
 
 if pgrep -f train_kaggle.py >/dev/null; then echo "A run is training right now."; else echo "Nothing is training right now."; fi
