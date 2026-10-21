@@ -143,6 +143,19 @@ two-GPU session `go.sh` first starts **Qwen3-VL-4B-Instruct** from Hugging Face 
 free, no daily limit. CoRe's reward-code rewriting (~16 calls per `core` run) still uses Gemini Flash-Lite.
 Use the same labelling model for every Phase 2 run. To use Gemini for labels instead: `PSVM_VLM=gemini bash kaggle/go.sh`.
 
+## Stopping early and continuing later
+
+`HOURS=2.5 bash kaggle/go.sh` stops the run itself about 15 min before that many hours. A run stopped this way
+(or by the VLM's daily quota) saves its networks, optimizers and labelled frames, and the next `bash kaggle/go.sh`
+continues it from that step: later the same week, next week, or in another account. What isn't kept is the replay
+buffer: the continued run refills it for 1,000 steps before SAC trains again, and the results table marks the run
+as continued. A run cut off by the session itself ending (no `incomplete.json`) can't continue and starts again
+from step 0.
+
+- **Same account:** `/kaggle/working` is kept between sessions, so just run `bash kaggle/go.sh` again.
+- **Another account:** `bash kaggle/save_results.sh`, download the zip, then in the other account's tunnel notebook
+  **Add Data → Upload** the zip before pressing Run. `go.sh` copies the stopped run in and continues it.
+
 ## 6. Save results before the session ends
 
 ```bash

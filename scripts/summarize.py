@@ -64,7 +64,8 @@ def load_runs(roots):
                        steps=np.array([e['step'] for e in evals]), sr=np.array([e['success_rate'] for e in evals]),
                        hours=summary.get('hours'), first_success=summary.get('first_success_step'),
                        svm_on=summary.get('svm_on_step'), labels=cfg['args'].get('labels', 'vlm'),
-                       vlm_model=cfg.get('vlm_model'), smoke=bool(cfg['args'].get('set')))
+                       vlm_model=cfg.get('vlm_model'), smoke=bool(cfg['args'].get('set')),
+                       continued_from=summary.get('continued_from'))
             if key not in runs or (run['complete'] and not runs[key]['complete']):
                 runs[key] = run
     return list(runs.values())
@@ -194,6 +195,10 @@ def main():
     scripted = sum(1 for r in runs if r['mode'] in PHASE2 and r['labels'] == 'scripted' and not r['smoke'])
     if scripted:
         lines.append(f"⚠ {scripted} Phase 2 runs used scripted labels; they are not comparable to the paper.")
+    continued = [r for r in runs if r.get('continued_from') and not r['smoke']]
+    if continued:
+        lines.append("Continued after an early stop (replay buffer restarted empty at that step): " + ', '.join(
+            f"{r['mode']}/{r['task']}/s{r['seed']} from step {', '.join(map(str, r['continued_from']))}" for r in continued))
     incomplete = [r for r in runs if not r['complete'] and not r['smoke']]
     if incomplete:
         lines.append(f"Incomplete runs left out: " + ', '.join(f"{r['mode']}/{r['task']}/s{r['seed']}" for r in incomplete))

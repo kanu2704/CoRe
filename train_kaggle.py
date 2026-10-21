@@ -24,11 +24,15 @@ Example:
   python train_kaggle.py --mode svm --task peg-insert-side-v2 --seed 0 --out runs
 """
 import argparse
+import glob
 import importlib.util
 import json
 import os
+import pickle
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from collections import defaultdict, deque
 from types import SimpleNamespace
@@ -203,6 +207,11 @@ class Run:
         self.first_success_step = None
         self.frm_refine_failures = 0
         self.start = time.time()
+        # set by continue_from() when this run continues one that was stopped early
+        self.hours_offset = 0.0
+        self.continued_from = []
+        self.episode0, self.interact0, self.avg_returns0 = 0, 0, []
+        self.update_from = 0
 
     # ------------------------------------------------------------------ logging
     def write(self, kind, **row):
@@ -310,7 +319,7 @@ class Run:
             returns.append(ep_ret)
         sr = 100.0 * float(np.mean(successes))
         self.write('eval', step=self.step, success_rate=sr, true_return=float(np.mean(returns)),
-                   hours=(time.time() - self.start) / 3600, rss_gb=rss_gb())
+                   hours=self.hours_offset + (time.time() - self.start) / 3600, rss_gb=rss_gb())
         print(f"[eval] step {self.step}  success {sr:.1f}%  ({(time.time() - self.start) / 3600:.2f} h, RSS {rss_gb():.1f} GB)")
 
     # ------------------------------------------------------------------ main loop (as train_CoRe.run)
@@ -318,9 +327,10 @@ class Run:
         cfg, args = self.cfg, self.args
         warmup = cfg['num_seed_steps'] + cfg['num_pre_steps']
         max_steps = self.env._max_episode_steps
-        episode, done = 0, True
-        interact_count = 0
-        avg_train_true_return = deque([], maxlen=10)
+        start_step = self.step  # 0, or the step a continued run starts from
+        episode, done = self.episode0, True
+        interact_count = self.interact0
+        avg_train_true_return = deque(self.avg_returns0, maxlen=10)
         ep_obs, ep_act, step_frm_dict = [], [], []
         ep_ret = ep_true = ep_struct = ep_rrm = ep_succ = 0.0
         last_print = time.time()
@@ -328,7 +338,7 @@ class Run:
 
         while self.step <= cfg['num_train_steps']:
             if done:
-                if self.step > 0:
+                if self.step > start_step:
                     if ep_succ and self.first_success_step is None:
                         self.first_success_step = self.step
                         self.write('events', step=self.step, event='first_success')
@@ -351,7 +361,7 @@ class Run:
                                **({k: v for k, v in self.svm.last.items()} if svm_changed else {}))
                     avg_train_true_return.append(ep_true)
 
-                if self.step > 0 and self.step % cfg['eval_frequency'] == 0:
+                if self.step > start_step and self.step % cfg['eval_frequency'] == 0:
                     self.evaluate()
                 if args.time_limit_hours and (time.time() - self.start) / 3600 > args.time_limit_hours:
                     timed_out = True
@@ -399,7 +409,7 @@ class Run:
                     self.relabel_rrm()
                     interact_count = 0
 
-            if self.step >= cfg['num_seed_steps']:
+            if self.step >= cfg['num_seed_steps'] and self.step >= self.update_from:
                 self.agent.update(self.replay, NullLogger(), self.step, 1)
 
             next_obs, env_reward, done, info = step_env(self.env, action)
@@ -451,7 +461,7 @@ class Run:
                 self.write('events', step=self.step, event='rrm_done', labeled=self.labeled_feedback)
 
             if time.time() - last_print > 120:
-                sps = self.step / max(time.time() - self.start, 1e-6)
+                sps = (self.step - start_step) / max(time.time() - self.start, 1e-6)
                 print(f"[{self.mode} {self.task} s{args.seed}] step {self.step}  {sps:.0f} steps/s  "
                       f"RSS {rss_gb():.1f} GB  feedback {self.labeled_feedback}")
                 last_print = time.time()
@@ -483,6 +493,167 @@ class Run:
                 self.replay.relabel_with_rf(self.frm, target_pos(self.env), self.step)
             self.write('events', step=self.step, event='frm_refine', improved=rf is not None)
 
+    # ------------------------------------------------------------------ continuing a run stopped early
+    def save_continue_state(self, model_dir):
+        """What a later continue_from() needs besides the networks: optimizer states, the entropy
+        weight, the SVM's episodes and the frames of the labelled segments (those live in /tmp,
+        which a Kaggle session wipes). The replay buffer is not saved."""
+        state = dict(log_alpha=self.agent.log_alpha.detach().cpu(),
+                     actor_opt=self.agent.actor_optimizer.state_dict(),
+                     critic_opt=self.agent.critic_optimizer.state_dict(),
+                     alpha_opt=self.agent.log_alpha_optimizer.state_dict())
+        if self.RRM is not None:
+            state['rrm_opt'] = self.RRM.opt.state_dict()
+        if self.svm is not None:
+            state.update(svm_store=self.svm.store, svm_opt=self.svm.opt.state_dict(), svm_rng=self.svm.rng)
+        torch.save(state, os.path.join(model_dir, f'state_{self.step}.pt'))
+        if self.phase2 and not self.RRM.preference_data_emptyed and self.labeled_feedback > 0:
+            from psvm.frames import encode_png
+            n_frames = (self.RRM.capacity if self.RRM.buffer_full else self.RRM.buffer_index) * self.cfg['segment']
+            blobs = {}
+            for name in ('buffer_seg1', 'buffer_seg2'):
+                frames = getattr(self.RRM, name)
+                blobs[name] = [encode_png(f, self.args.png_level)
+                               for a in range(0, n_frames, 256)
+                               for f in frames.take(np.arange(a, min(a + 256, n_frames)))]
+            path = os.path.join(self.run_dir, 'label_frames.pkl')
+            with open(path + '.tmp', 'wb') as f:
+                pickle.dump(blobs, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(path + '.tmp', path)
+
+    def label_frames(self, n):
+        """Frames of the first n labelled segment pairs, as get(name, start, stop) -> uint8 frames.
+        From label_frames.pkl (written when a run stops early) or label_frames.tgz (the RRM's
+        seg1_*/seg2_* frame files copied by hand from /tmp/psvm_frames before the session ended)."""
+        n_frames, size = n * self.cfg['segment'], self.cfg['image_size']
+        path = os.path.join(self.run_dir, 'label_frames.pkl')
+        if os.path.exists(path):
+            from psvm.frames import decode_png
+            with open(path, 'rb') as f:
+                blobs = pickle.load(f)
+            if min(len(v) for v in blobs.values()) < n_frames:
+                return None, 'label_frames.pkl has fewer frames than labels'
+            get = lambda name, a, b: np.stack([decode_png(x) for x in blobs['buffer_' + name][a:b]])
+            return get, 'label_frames.pkl'
+        path = os.path.join(self.run_dir, 'label_frames.tgz')
+        if os.path.exists(path):
+            tmp = tempfile.mkdtemp(prefix='label_frames_', dir=os.environ.get('PSVM_DISK_DIR') or None)
+            self._label_tmp = tmp
+            subprocess.run(['tar', '-xzf', path, '-C', tmp], check=True)
+            names = sorted(os.listdir(tmp))
+            found = {k: [x for x in names if x.startswith(k + '_')] for k in ('seg1', 'seg2')}
+            if any(len(v) != 1 for v in found.values()):
+                return None, f'label_frames.tgz should hold one seg1_* and one seg2_* file, found {names}'
+            arrays = {}
+            for k, (name,) in found.items():
+                frames = np.memmap(os.path.join(tmp, name), dtype=np.uint8, mode='r').reshape(-1, size, size, 3)
+                if len(frames) < n_frames or not frames[n_frames - 1].any():
+                    return None, f'{name} does not hold all {n} labelled segments'
+                arrays[k] = frames
+            return (lambda name, a, b: np.array(arrays[name][a:b])), 'label_frames.tgz'
+        return None, 'no saved label frames (label_frames.pkl / label_frames.tgz)'
+
+    def restore_rrm_labels(self):
+        """Refill the RRM's labelled-segment buffer exactly as the stopped run filled it:
+        labels, VLM weights and states from vlm_label_set/*.pkl (one file per round), frames
+        from label_frames(). Returns (number of labels restored, source or reason)."""
+        rounds = []
+        for path in sorted(glob.glob(os.path.join(self.run_dir, 'vlm_label_set', '*.pkl'))):
+            with open(path, 'rb') as f:
+                _, _, vlm_labels, vlm_weights, sa_t_1, sa_t_2, _, _ = pickle.load(f)
+            if len(vlm_labels):
+                rounds.append((vlm_labels, vlm_weights, sa_t_1, sa_t_2))
+        n = sum(len(r[0]) for r in rounds)
+        if n == 0:
+            return 0, 'no labels yet'
+        if n != self.labeled_feedback:
+            return 0, f'{n} labels in vlm_label_set but the run had {self.labeled_feedback}'
+        get, source = self.label_frames(n)
+        try:
+            if get is None:
+                return 0, source
+            seg, size, i = self.cfg['segment'], self.cfg['image_size'], 0
+            for vlm_labels, vlm_weights, sa_t_1, sa_t_2 in rounds:
+                k = len(vlm_labels)
+                img_t_1 = get('seg1', i * seg, (i + k) * seg).reshape(k, seg, size, size, 3)
+                img_t_2 = get('seg2', i * seg, (i + k) * seg).reshape(k, seg, size, size, 3)
+                self.RRM.put_queries(img_t_1, img_t_2, vlm_labels, sa_t_1, sa_t_2, vlm_weights)
+                i += k
+            return n, source
+        finally:
+            if getattr(self, '_label_tmp', None):
+                shutil.rmtree(self._label_tmp, ignore_errors=True)
+
+    def continue_from(self, stopped):
+        """Continue a run that stopped early (incomplete.json) from the step it stopped at.
+        Restored: the networks, the counters and label schedule, the RRM's labels, and (if saved)
+        the optimizers, entropy weight and SVM episodes. Not restored: the replay buffer, which
+        starts empty; SAC updates resume after num_seed_steps new steps refill it."""
+        cfg, step = self.cfg, int(stopped['steps'])
+        model_dir = os.path.join(self.run_dir, 'models')
+        load = lambda name: torch.load(os.path.join(model_dir, name), map_location=self.device, weights_only=False)
+        self.agent.actor.load_state_dict(load(f'actor_{step}.pt'))
+        self.agent.critic.load_state_dict(load(f'critic_{step}.pt'))
+        self.agent.critic_target.load_state_dict(load(f'critic_target_{step}.pt'))
+        extra = load(f'state_{step}.pt') if os.path.exists(os.path.join(model_dir, f'state_{step}.pt')) else None
+        if extra:
+            with torch.no_grad():
+                self.agent.log_alpha.copy_(extra['log_alpha'].to(self.agent.log_alpha.device))
+            self.agent.actor_optimizer.load_state_dict(extra['actor_opt'])
+            self.agent.critic_optimizer.load_state_dict(extra['critic_opt'])
+            self.agent.log_alpha_optimizer.load_state_dict(extra['alpha_opt'])
+        if self.RRM is not None:
+            for m in range(self.RRM.de):
+                self.RRM.ensemble[m].load_state_dict(load(f'reward_model_{step}_{m}.pt'))
+            if extra and 'rrm_opt' in extra:
+                self.RRM.opt.load_state_dict(extra['rrm_opt'])
+        if self.svm is not None and os.path.exists(os.path.join(model_dir, 'svm.pt')):
+            d = load('svm.pt')
+            self.svm.disc.load_state_dict(d['disc'])
+            self.svm.mean, self.svm.std, self.svm.ready = d['mean'], d['std'], d['ready']
+            if extra and 'svm_store' in extra:
+                self.svm.store, self.svm.rng = extra['svm_store'], extra['svm_rng']
+                self.svm.opt.load_state_dict(extra['svm_opt'])
+            elif self.svm.ready:
+                self.svm.ready = False  # its episodes were not saved: switch on again from new ones
+
+        # counters, from the run's own logs
+        read = lambda kind: [json.loads(l) for l in open(os.path.join(self.run_dir, f'{kind}.jsonl'))]
+        episodes = [e for e in read('episodes') if e['step'] <= step]
+        rounds = [e for e in read('events') if e['event'] == 'rrm_update' and e['step'] <= step]
+        self.step = step
+        self.labeled_feedback = int(stopped.get('labeled_feedback', 0))
+        self.total_feedback = int(rounds[-1]['total']) if rounds else 0
+        self.first_success_step = stopped.get('first_success_step')
+        self.svm_on_step = stopped.get('svm_on_step')
+        self.frm_refine_failures = int(stopped.get('frm_refine_failures', 0))
+        self.hours_offset = float(stopped.get('hours', 0.0))
+        self.continued_from = list(stopped.get('continued_from', [])) + [step]
+        self.episode0 = episodes[-1]['episode'] if episodes else 0
+        self.avg_returns0 = [e['true_return'] for e in episodes[-10:]]
+        max_steps = self.env._max_episode_steps
+        if rounds:  # keep the label schedule; collect at least one episode before the next round
+            self.interact0 = min(step - rounds[-1]['step'], cfg['num_interact'] - max_steps)
+        self.update_from = step + cfg['num_seed_steps']
+
+        restored, note = 0, ''
+        if self.phase2:
+            if step > cfg['num_seed_steps'] + cfg['num_pre_steps']:
+                self.alpha = cfg['reward_alpha']
+                self.replay.reward_alpha = cfg['reward_alpha']
+            if self.total_feedback >= cfg['max_feedback']:
+                self.RRM.empty_preference_data()
+                self.replay.drop_images()
+                self.store_images = False
+            else:
+                restored, note = self.restore_rrm_labels()
+        utils.set_seed_everywhere(self.args.seed + step)
+        self.write('events', step=step, event='continued', from_step=step, restored_labels=restored,
+                   labels_of=self.labeled_feedback, labels_note=note, optimizers_restored=bool(extra),
+                   replay='empty; SAC updates resume after %d new steps' % cfg['num_seed_steps'])
+        print(f"[continue] from step {step}: {restored}/{self.labeled_feedback} labels restored ({note}), "
+              f"optimizers {'restored' if extra else 'new'}, replay buffer empty")
+
     def close(self, timed_out, reason=None):
         model_dir = os.path.join(self.run_dir, 'models')
         os.makedirs(model_dir, exist_ok=True)
@@ -491,16 +662,33 @@ class Run:
             self.RRM.save(model_dir, self.step)
         if self.svm is not None:
             self.svm.save(os.path.join(model_dir, 'svm.pt'))
+        if timed_out:
+            self.save_continue_state(model_dir)
         summary = dict(mode=self.mode, task=self.task, seed=self.args.seed, steps=self.step,
-                       complete=not timed_out, hours=(time.time() - self.start) / 3600,
+                       complete=not timed_out, hours=self.hours_offset + (time.time() - self.start) / 3600,
                        first_success_step=self.first_success_step, svm_on_step=self.svm_on_step,
                        labeled_feedback=self.labeled_feedback, peak_rss_gb=rss_gb(),
                        frm_refine_failures=self.frm_refine_failures, stop_reason=reason)
+        if self.continued_from:
+            summary['continued_from'] = self.continued_from
         with open(os.path.join(self.run_dir, 'done.json' if not timed_out else 'incomplete.json'), 'w') as f:
             json.dump(summary, f, indent=2)
         for f in self.files.values():
             f.close()
         print("[done]", json.dumps(summary))
+
+
+def stopped_early(run_dir):
+    """incomplete.json of a run that stopped early with its networks saved (it can continue), else None."""
+    path = os.path.join(run_dir, 'incomplete.json')
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        stopped = json.load(f)
+    step = int(stopped.get('steps', 0))
+    if step <= 0 or not os.path.exists(os.path.join(run_dir, 'models', f'actor_{step}.pt')):
+        return None
+    return stopped
 
 
 def main():
@@ -524,6 +712,8 @@ def main():
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")
     p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--no_continue', dest='continue_runs', action='store_false',
+                   help="start a run that stopped early from step 0 instead of continuing it")
     p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
                    help="override a hyperparameter, e.g. --set num_train_steps=20000 (smoke tests only)")
     args = p.parse_args()
@@ -562,16 +752,19 @@ def main():
             return
         except (ValueError, OSError):
             pass  # stale lock from a run that died
-    if os.path.exists(run_dir):
-        for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json', 'done.json'):
+    stopped = None if (args.overwrite or not args.continue_runs) else stopped_early(run_dir)
+    if stopped is None and os.path.exists(run_dir):
+        for name in ('eval.jsonl', 'episodes.jsonl', 'events.jsonl', 'incomplete.json', 'done.json',
+                     'label_frames.pkl', 'label_frames.tgz'):
             if os.path.exists(os.path.join(run_dir, name)):
                 os.remove(os.path.join(run_dir, name))
         for name in ('vlm_output', 'vlm_label_set', 'models'):  # leftovers of an earlier attempt
             shutil.rmtree(os.path.join(run_dir, name), ignore_errors=True)
     os.makedirs(run_dir, exist_ok=True)
-    with open(os.path.join(run_dir, 'config.json'), 'w') as f:
-        json.dump(dict(args=vars(args), cfg=cfg, vlm_model=os.environ.get('VLM_MODEL'),
-                       torch=torch.__version__, cuda=torch.cuda.is_available()), f, indent=2)
+    if stopped is None:
+        with open(os.path.join(run_dir, 'config.json'), 'w') as f:
+            json.dump(dict(args=vars(args), cfg=cfg, vlm_model=os.environ.get('VLM_MODEL'),
+                           torch=torch.__version__, cuda=torch.cuda.is_available()), f, indent=2)
     with open(lock, 'w') as f:
         f.write(str(os.getpid()))
     os.chdir(run_dir)  # CoRe writes VLM/LLM files relative to the working directory
@@ -579,6 +772,9 @@ def main():
     try:
         from FRM.code_agent import DailyQuotaError
         run = Run(args, cfg, run_dir)
+        if stopped is not None:
+            run.continue_from(stopped)
+            os.remove(os.path.join(run_dir, 'incomplete.json'))
         try:
             timed_out, reason = run.run(), None
         except DailyQuotaError as e:

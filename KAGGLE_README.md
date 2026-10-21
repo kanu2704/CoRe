@@ -90,6 +90,7 @@ Hammer scenes, and only work on Button Press.
 - One VLM model ID for all of Phase 2 (`summarize.py` warns if it sees more than one).
 - `--labels scripted` (true preferences instead of the VLM) is for testing only. Those runs aren't comparable to the paper.
 - Use the bundled MetaWorld, never `pip install metaworld`.
+- A run continued after an early stop (`HOURS=...`) restarts its replay buffer empty at that step; `summarize.py` lists such runs. Report it.
 
 ## What changed in CoRe's files
 

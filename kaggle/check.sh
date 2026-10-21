@@ -14,6 +14,8 @@ for ev in "$WORK"/runs/*/*/seed*/events.jsonl; do
   [ -f "$ev" ] || continue
   d="$(dirname "$ev")"
   [ -f "$d/done.json" ] && continue
+  cont="$(grep '"continued"' "$ev" | tail -1)"
+  [ -n "$cont" ] && echo "$(basename "$(dirname "$d")") $(basename "$d"): $cont"
   last="$(grep rrm_update "$ev" | tail -1)"
   [ -n "$last" ] && echo "$(basename "$(dirname "$d")") $(basename "$d"): $last"
 done
