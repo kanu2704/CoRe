@@ -14,6 +14,7 @@ Phase 2 - CoRe's protocol with rendered images and the image reward model (T4):
   rrm_only     RRM alone                                       (paper row: RRM)
   rrm_sparse   RRM + success reward (control: is the success bit alone enough?)
   rrm_svm      RRM + oracle SVM (main test)
+  rrm_psvm     RRM + P-SVM: success weights q graded 0-10 by the VLM from each episode's final frame
 
 Every hyperparameter defaults to CoRe's run_meta.sh / config/train_CoRe.yaml, and
 the training loop follows train_CoRe.py step for step. The only differences are
@@ -62,8 +63,8 @@ def import_simulation_modules():
     utils, ReplayBuffer, Frame, SVMReward = _utils, _ReplayBuffer, _Frame, _SVMReward
 
 PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded']
-PHASE2_MODES = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm']
-SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm']
+PHASE2_MODES = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm', 'rrm_psvm']
+SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm']
 TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2',
          'soccer-v2', 'sweep-into-v2', 'drawer-open-v2', 'dial-turn-v2']
 
@@ -200,6 +201,10 @@ class Run:
                                  clip_beta=cfg['svm_clip'], scale=cfg['svm_scale'], seed=args.seed)
             if self.mode == 'svm_seeded':
                 self.seed_svm(cfg['svm_seed_episodes'])
+        self.judge = None
+        if self.mode == 'rrm_psvm' and args.success_judge == 'vlm':
+            from psvm.judge import SuccessJudge
+            self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR)
 
         self.step = 0
         self.total_feedback = 0
@@ -238,6 +243,14 @@ class Run:
             r = self.svm.reward(obs, action)
             return r + (float(success) if m == 'svm_sparse' else 0.0), None
         return 0.0, None  # rrm_only
+
+    def success_weight(self, final_frame, success, true_return, max_steps):
+        """rrm_psvm: the episode's success weight q, graded by the VLM from its final frame
+        (--success_judge scripted: a dense-reward progress proxy, for testing without a VLM)."""
+        if self.judge is None:
+            return float(np.clip(true_return / (10.0 * max_steps), 0.0, 1.0)) if not success else 1.0
+        q = self.judge.grade(final_frame)
+        return 0.0 if q is None else q  # no usable answer: count it as a failure
 
     def svm_relabel_fn(self, obses, actions, successes):
         r = self.svm.reward_batch(obses, actions)
@@ -347,8 +360,9 @@ class Run:
                         self.first_success_step = self.step
                         self.write('events', step=self.step, event='first_success')
                     svm_changed = False
+                    q = ep_succ if self.mode != 'rrm_psvm' else self.success_weight(rgb, ep_succ, ep_true, max_steps)
                     if self.svm is not None:
-                        self.svm.add_episode(np.array(ep_obs), np.array(ep_act), q=ep_succ, y=ep_succ)
+                        self.svm.add_episode(np.array(ep_obs), np.array(ep_act), q=q, y=ep_succ)
                         was_ready = self.svm.ready
                         svm_changed = self.svm.update()
                         if self.svm.ready and not was_ready:
@@ -362,6 +376,7 @@ class Run:
                                reward_return=ep_ret, struct_return=ep_struct, rrm_return=ep_rrm,
                                svm_ready=bool(self.svm.ready) if self.svm else None,
                                labeled_feedback=self.labeled_feedback,
+                               **({'q': q} if self.mode == 'rrm_psvm' else {}),
                                **({k: v for k, v in self.svm.last.items()} if svm_changed else {}))
                     avg_train_true_return.append(ep_true)
 
@@ -797,6 +812,8 @@ def main():
                    help="image storage: png/disk are lossless and save RAM; ram = original")
     p.add_argument('--png_level', type=int, default=1)
     p.add_argument('--save_label_images', action='store_true', help="keep images in saved label files (large)")
+    p.add_argument('--success_judge', default='vlm', choices=['vlm', 'scripted'],
+                   help="rrm_psvm: grade episodes with the VLM, or a dense-reward proxy (testing only)")
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")
     p.add_argument('--overwrite', action='store_true')

@@ -4,6 +4,7 @@
 # GPU session -> the next Phase 2 run (about 7-8 h).  CPU session -> Phase 1 runs.
 # Check on it with:  bash kaggle/check.sh     Save before stopping the session:  bash kaggle/save_results.sh
 # Little GPU quota left?  HOURS=2.5 bash kaggle/go.sh  stops the run ~15 min before HOURS (marked incomplete).
+# Another plan:  PLAN=psvm_peg bash kaggle/go.sh   (plans are in scripts/plans.py; default phase2_peg)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -28,11 +29,11 @@ if [ -n "${HOURS:-}" ]; then
   EST=0.1                        # start it even though it can't finish
 fi
 if "$PY" -c "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-  bash kaggle/run.sh phase2_peg --max_runs "${RUNS:-1}" --est_hours "$EST" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
+  bash kaggle/run.sh "${PLAN:-phase2_peg}" --max_runs "${RUNS:-1}" --est_hours "$EST" ${EXTRA[@]+"${EXTRA[@]}"} >/dev/null
   if [ -n "${HOURS:-}" ]; then
-    echo "Started the next Phase 2 run (Peg Insert). It stops itself after about $(awk -v h="$HOURS" 'BEGIN { printf "%.2f", h - 0.25 }') h (marked incomplete)."
+    echo "Started the next ${PLAN:-phase2_peg} run. It stops itself after about $(awk -v h="$HOURS" 'BEGIN { printf "%.2f", h - 0.25 }') h (marked incomplete)."
   else
-    echo "Started the next Phase 2 run (Peg Insert). It takes about 7-8 hours and keeps going if VS Code disconnects."
+    echo "Started the next ${PLAN:-phase2_peg} run. It takes about 11 hours and keeps going if VS Code disconnects."
   fi
 else
   bash kaggle/run.sh phase1 >/dev/null

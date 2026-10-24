@@ -25,6 +25,9 @@ PLANS = {
     'phase2_peg_control': runs(PHASE2_CONTROL, ['peg-insert-side-v2'], range(3)),
     'phase2_hammer': runs(PHASE2_MAIN, ['hammer-v2'], range(3)),
     'phase2_button': runs(PHASE2_MAIN, ['button-press-topdown-v2'], range(3)),
+    # P-SVM with VLM-graded soft success weights (the fix for the cold start on Peg Insert)
+    'psvm_peg': runs(['rrm_psvm'], ['peg-insert-side-v2'], range(3)),
+    'psvm_hammer': runs(['rrm_psvm'], ['hammer-v2'], range(3)),
     # a few minutes each: checks the whole pipeline before spending quota
     'smoke_phase1': runs(['env_dense', 'svm'], ['button-press-topdown-v2'], [0]),
     'smoke_phase2': runs(['rrm_svm'], ['button-press-topdown-v2'], [0]),
