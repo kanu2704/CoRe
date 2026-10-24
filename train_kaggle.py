@@ -204,7 +204,8 @@ class Run:
         self.judge = None
         if self.mode == 'rrm_psvm' and args.success_judge == 'vlm':
             from psvm.judge import SuccessJudge
-            self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR)
+            self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR, style=args.judge_style)
+        self.ep_frames = []  # rrm_psvm: frames at 1/2, 3/4 and the end of the episode, for the judge
 
         self.step = 0
         self.total_feedback = 0
@@ -244,12 +245,12 @@ class Run:
             return r + (float(success) if m == 'svm_sparse' else 0.0), None
         return 0.0, None  # rrm_only
 
-    def success_weight(self, final_frame, success, true_return, max_steps):
-        """rrm_psvm: the episode's success weight q, graded by the VLM from its final frame
+    def success_weight(self, frames, success, true_return, max_steps):
+        """rrm_psvm: the episode's success weight q, graded by the VLM from frames of the episode
         (--success_judge scripted: a dense-reward progress proxy, for testing without a VLM)."""
         if self.judge is None:
             return float(np.clip(true_return / (10.0 * max_steps), 0.0, 1.0)) if not success else 1.0
-        q = self.judge.grade(final_frame)
+        q = self.judge.grade(frames)
         return 0.0 if q is None else q  # no usable answer: count it as a failure
 
     def svm_relabel_fn(self, obses, actions, successes):
@@ -360,7 +361,8 @@ class Run:
                         self.first_success_step = self.step
                         self.write('events', step=self.step, event='first_success')
                     svm_changed = False
-                    q = ep_succ if self.mode != 'rrm_psvm' else self.success_weight(rgb, ep_succ, ep_true, max_steps)
+                    q = ep_succ if self.mode != 'rrm_psvm' else self.success_weight(
+                        self.ep_frames or [rgb], ep_succ, ep_true, max_steps)
                     if self.svm is not None:
                         self.svm.add_episode(np.array(ep_obs), np.array(ep_act), q=q, y=ep_succ)
                         was_ready = self.svm.ready
@@ -395,6 +397,7 @@ class Run:
                 ep_ret = ep_true = ep_struct = ep_rrm = ep_succ = 0.0
                 ep_obs, ep_act, step_frm_dict = [], [], []
                 episode_step = 0
+                self.ep_frames = []
                 episode += 1
 
             # action
@@ -445,6 +448,8 @@ class Run:
                     self.write('events', step=0, event='renderer', renderer=gl_renderer(),
                                first_frame_ms=(time.time() - t_render) * 1e3)
                 frame = Frame(rgb, args.png_level)
+                if self.mode == 'rrm_psvm' and (episode_step + 1) in (max_steps // 2, 3 * max_steps // 4, max_steps):
+                    self.ep_frames.append(rgb)
                 if self.step >= warmup:
                     r_rrm = self.rrm_reward(rgb)
 
@@ -814,6 +819,8 @@ def main():
     p.add_argument('--save_label_images', action='store_true', help="keep images in saved label files (large)")
     p.add_argument('--success_judge', default='vlm', choices=['vlm', 'scripted'],
                    help="rrm_psvm: grade episodes with the VLM, or a dense-reward proxy (testing only)")
+    p.add_argument('--judge_style', default='stages', choices=['stages', 'scale'],
+                   help="rrm_psvm: furthest stage of a task checklist over 3 frames, or a 0-10 grade of the final frame")
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")
     p.add_argument('--overwrite', action='store_true')
