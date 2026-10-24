@@ -213,6 +213,9 @@ class Run:
         self.continued_from = []
         self.episode0, self.interact0, self.avg_returns0 = 0, 0, []
         self.update_from = 0
+        # periodic save points (--save_every_min), so a run killed without a clean stop loses little
+        self.last_save, self.last_save_step = time.time(), None
+        self._label_png = {'buffer_seg1': [], 'buffer_seg2': []}  # PNGs of labelled frames already encoded
 
     # ------------------------------------------------------------------ logging
     def write(self, kind, **row):
@@ -367,6 +370,8 @@ class Run:
                 if args.time_limit_hours and (time.time() - self.start) / 3600 > args.time_limit_hours:
                     timed_out = True
                     break
+                if args.save_every_min and self.step > start_step and time.time() - self.last_save > 60 * args.save_every_min:
+                    self.save_point()
 
                 obs = reset_env(self.env)
                 if self.frm_gen is not None:
@@ -513,14 +518,42 @@ class Run:
             n_frames = (self.RRM.capacity if self.RRM.buffer_full else self.RRM.buffer_index) * self.cfg['segment']
             blobs = {}
             for name in ('buffer_seg1', 'buffer_seg2'):
-                frames = getattr(self.RRM, name)
-                blobs[name] = [encode_png(f, self.args.png_level)
-                               for a in range(0, n_frames, 256)
-                               for f in frames.take(np.arange(a, min(a + 256, n_frames)))]
+                frames, done = getattr(self.RRM, name), self._label_png[name]  # labelled frames never change
+                for a in range(len(done), n_frames, 256):
+                    done.extend(encode_png(f, self.args.png_level) for f in frames.take(np.arange(a, min(a + 256, n_frames))))
+                blobs[name] = done[:n_frames]
             path = os.path.join(self.run_dir, 'label_frames.pkl')
             with open(path + '.tmp', 'wb') as f:
                 pickle.dump(blobs, f, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(path + '.tmp', path)
+
+    def save_point(self):
+        """Save everything continue_from() needs at this step, written as saved_at_<step>.json last so
+        a kill during the save leaves the previous save point intact; then drop the previous one."""
+        model_dir = os.path.join(self.run_dir, 'models')
+        os.makedirs(model_dir, exist_ok=True)
+        self.agent.save(model_dir, self.step)
+        if self.RRM is not None:
+            self.RRM.save(model_dir, self.step)
+        if self.svm is not None:
+            self.svm.save(os.path.join(model_dir, f'svm_{self.step}.pt'))
+        self.save_continue_state(model_dir)
+        record = dict(steps=self.step, labeled_feedback=self.labeled_feedback,
+                      hours=self.hours_offset + (time.time() - self.start) / 3600,
+                      first_success_step=self.first_success_step, svm_on_step=self.svm_on_step,
+                      frm_refine_failures=self.frm_refine_failures, continued_from=self.continued_from)
+        path = os.path.join(self.run_dir, f'saved_at_{self.step}.json')
+        with open(path + '.tmp', 'w') as f:
+            json.dump(record, f, indent=2)
+        os.replace(path + '.tmp', path)
+        prev = self.last_save_step
+        if prev is not None and prev != self.step:
+            for old in (glob.glob(os.path.join(model_dir, f'*_{prev}.pt')) + glob.glob(os.path.join(model_dir, f'reward_model_{prev}_*.pt'))
+                        + [os.path.join(self.run_dir, f'saved_at_{prev}.json')]):
+                if os.path.exists(old):
+                    os.remove(old)
+        self.last_save, self.last_save_step = time.time(), self.step
+        self.write('events', step=self.step, event='saved', labeled=self.labeled_feedback)
 
     def label_frames(self, n):
         """Frames of the first n labelled segment pairs, as get(name, start, stop) -> uint8 frames.
@@ -633,8 +666,9 @@ class Run:
                 self.RRM.ensemble[m].load_state_dict(load(f'reward_model_{step}_{m}.pt'))
             if extra and 'rrm_opt' in extra:
                 self.RRM.opt.load_state_dict(extra['rrm_opt'])
-        if self.svm is not None and os.path.exists(os.path.join(model_dir, 'svm.pt')):
-            d = load('svm.pt')
+        svm_file = f'svm_{step}.pt' if os.path.exists(os.path.join(model_dir, f'svm_{step}.pt')) else 'svm.pt'
+        if self.svm is not None and os.path.exists(os.path.join(model_dir, svm_file)):
+            d = load(svm_file)
             self.svm.disc.load_state_dict(d['disc'])
             self.svm.mean, self.svm.std, self.svm.ready = d['mean'], d['std'], d['ready']
             if extra and 'svm_store' in extra:
@@ -706,26 +740,23 @@ class Run:
 
 
 def stopped_early(run_dir):
-    """The record of the stop a run can continue from (networks saved at that step), else None:
-    incomplete.json after a clean early stop. If the run was continued and then killed without a
-    clean stop, the stop it continued from: stopped_at_<step>.json, or for runs continued by an
-    earlier version of this script, rebuilt from its 'continued' event. The work up to that stop
-    is kept; what the killed attempt did after it is lost."""
+    """The record of the point a run can continue from (networks saved at that step), else None:
+    incomplete.json after a clean early stop; if the run was killed without one, its newest save
+    point. What the killed attempt did after that point is lost."""
     if os.path.exists(os.path.join(run_dir, 'done.json')):
         return None
+    usable = lambda r: r and int(r.get('steps', 0)) > 0 and os.path.exists(
+        os.path.join(run_dir, 'models', f"actor_{int(r['steps'])}.pt"))
     path = os.path.join(run_dir, 'incomplete.json')
-    saved = sorted(glob.glob(os.path.join(run_dir, 'stopped_at_*.json')),
-                   key=lambda p: int(re.findall(r'\d+', os.path.basename(p))[0]))
-    if os.path.exists(path):
+    if os.path.exists(path):  # a clean stop is always the latest point
         stopped = json.load(open(path))
-    elif saved:
-        stopped = json.load(open(saved[-1]))
-    else:
-        stopped = stop_from_logs(run_dir)
-    step = int(stopped.get('steps', 0)) if stopped else 0
-    if step <= 0 or not os.path.exists(os.path.join(run_dir, 'models', f'actor_{step}.pt')):
-        return None
-    return stopped
+        return stopped if usable(stopped) else None
+    # killed without a clean stop: the newest save point (saved_at_*: periodic, stopped_at_*: the stop
+    # an attempt continued from, or rebuilt from the 'continued' event of an older version)
+    records = [json.load(open(p)) for p in glob.glob(os.path.join(run_dir, 'saved_at_*.json'))
+               + glob.glob(os.path.join(run_dir, 'stopped_at_*.json'))] + [stop_from_logs(run_dir)]
+    records = [r for r in records if usable(r)]
+    return max(records, key=lambda r: int(r['steps'])) if records else None
 
 
 def stop_from_logs(run_dir):
@@ -769,6 +800,8 @@ def main():
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")
     p.add_argument('--overwrite', action='store_true')
+    p.add_argument('--save_every_min', type=float, default=30,
+                   help="save a point to continue from every this many minutes (0 = only at a clean stop)")
     p.add_argument('--no_continue', dest='continue_runs', action='store_false',
                    help="start a run that stopped early from step 0 instead of continuing it")
     p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
@@ -817,7 +850,7 @@ def main():
                 os.remove(os.path.join(run_dir, name))
         for name in ('vlm_output', 'vlm_label_set', 'vlm_label_set_discarded', 'models'):  # leftovers of an earlier attempt
             shutil.rmtree(os.path.join(run_dir, name), ignore_errors=True)
-        for path in glob.glob(os.path.join(run_dir, 'stopped_at_*.json')):
+        for path in glob.glob(os.path.join(run_dir, 'stopped_at_*.json')) + glob.glob(os.path.join(run_dir, 'saved_at_*.json')):
             os.remove(path)
     os.makedirs(run_dir, exist_ok=True)
     if stopped is None:

@@ -149,8 +149,8 @@ Use the same labelling model for every Phase 2 run. To use Gemini for labels ins
 (or by the VLM's daily quota) saves its networks, optimizers and labelled frames, and the next `bash kaggle/go.sh`
 continues it from that step: later the same week, next week, or in another account. What isn't kept is the replay
 buffer: the continued run refills it for 1,000 steps before SAC trains again, and the results table marks the run
-as continued. A run cut off by the session itself ending (no `incomplete.json`) can't continue and starts again
-from step 0.
+as continued. Runs also save a point to continue from every 30 minutes (`--extra --save_every_min N` to change it),
+so a run killed without a clean stop (session ended, laptop off) loses at most that much.
 
 - **Same account:** `/kaggle/working` is kept between sessions, so just run `bash kaggle/go.sh` again.
 - **Another account:** `bash kaggle/save_results.sh`, download the zip, then in the other account's tunnel notebook

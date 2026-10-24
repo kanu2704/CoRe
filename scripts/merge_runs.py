@@ -38,7 +38,8 @@ def stopped_step(d):
     try:
         step = int(json.load(open(os.path.join(d, 'incomplete.json')))['steps'])
     except (OSError, ValueError, KeyError):
-        saved = [int(re.findall(r'\d+', os.path.basename(p))[0]) for p in glob.glob(os.path.join(d, 'stopped_at_*.json'))]
+        saved = [int(re.findall(r'\d+', os.path.basename(p))[0])
+                 for p in glob.glob(os.path.join(d, 'stopped_at_*.json')) + glob.glob(os.path.join(d, 'saved_at_*.json'))]
         if saved:
             step = max(saved)
         else:
