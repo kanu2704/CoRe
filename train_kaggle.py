@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -553,6 +554,30 @@ class Run:
             return (lambda name, a, b: np.array(arrays[name][a:b])), 'label_frames.tgz'
         return None, 'no saved label frames (label_frames.pkl / label_frames.tgz)'
 
+    def trim_after(self, step):
+        """Drop what an attempt that continued from `step` and was then killed (no clean stop) wrote:
+        log rows after the stop, and label files of rounds after it (moved to vlm_label_set_discarded)."""
+        for f in self.files.values():
+            f.close()
+        kept = {}
+        for kind in ('eval', 'episodes', 'events'):
+            path = os.path.join(self.run_dir, f'{kind}.jsonl')
+            rows = [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+            keep = [r for r in rows if r['step'] < step or (r['step'] == step and r.get('event') != 'continued')]
+            kept[kind] = keep
+            if len(keep) != len(rows):
+                with open(path + '.tmp', 'w') as f:
+                    f.writelines(json.dumps(r) + '\n' for r in keep)
+                os.replace(path + '.tmp', path)
+        self.files = {k: open(os.path.join(self.run_dir, f'{k}.jsonl'), 'a') for k in ('eval', 'episodes', 'events')}
+        n_rounds = sum(1 for r in kept['events'] if r.get('event') == 'rrm_update')
+        label_files = sorted(glob.glob(os.path.join(self.run_dir, 'vlm_label_set', '*.pkl')))
+        if len(label_files) > n_rounds:
+            aside = os.path.join(self.run_dir, 'vlm_label_set_discarded')
+            os.makedirs(aside, exist_ok=True)
+            for path in label_files[n_rounds:]:
+                shutil.move(path, os.path.join(aside, os.path.basename(path)))
+
     def restore_rrm_labels(self):
         """Refill the RRM's labelled-segment buffer exactly as the stopped run filled it:
         labels, VLM weights and states from vlm_label_set/*.pkl (one file per round), frames
@@ -590,6 +615,7 @@ class Run:
         the optimizers, entropy weight and SVM episodes. Not restored: the replay buffer, which
         starts empty; SAC updates resume after num_seed_steps new steps refill it."""
         cfg, step = self.cfg, int(stopped['steps'])
+        self.trim_after(step)
         model_dir = os.path.join(self.run_dir, 'models')
         load = lambda name: torch.load(os.path.join(model_dir, name), map_location=self.device, weights_only=False)
         self.agent.actor.load_state_dict(load(f'actor_{step}.pt'))
@@ -648,7 +674,8 @@ class Run:
             else:
                 restored, note = self.restore_rrm_labels()
         utils.set_seed_everywhere(self.args.seed + step)
-        self.write('events', step=step, event='continued', from_step=step, restored_labels=restored,
+        self.write('events', step=step, event='continued', from_step=step, hours_before=self.hours_offset,
+                   restored_labels=restored,
                    labels_of=self.labeled_feedback, labels_note=note, optimizers_restored=bool(extra),
                    replay='empty; SAC updates resume after %d new steps' % cfg['num_seed_steps'])
         print(f"[continue] from step {step}: {restored}/{self.labeled_feedback} labels restored ({note}), "
@@ -679,16 +706,46 @@ class Run:
 
 
 def stopped_early(run_dir):
-    """incomplete.json of a run that stopped early with its networks saved (it can continue), else None."""
-    path = os.path.join(run_dir, 'incomplete.json')
-    if not os.path.exists(path):
+    """The record of the stop a run can continue from (networks saved at that step), else None:
+    incomplete.json after a clean early stop. If the run was continued and then killed without a
+    clean stop, the stop it continued from: stopped_at_<step>.json, or for runs continued by an
+    earlier version of this script, rebuilt from its 'continued' event. The work up to that stop
+    is kept; what the killed attempt did after it is lost."""
+    if os.path.exists(os.path.join(run_dir, 'done.json')):
         return None
-    with open(path) as f:
-        stopped = json.load(f)
-    step = int(stopped.get('steps', 0))
+    path = os.path.join(run_dir, 'incomplete.json')
+    saved = sorted(glob.glob(os.path.join(run_dir, 'stopped_at_*.json')),
+                   key=lambda p: int(re.findall(r'\d+', os.path.basename(p))[0]))
+    if os.path.exists(path):
+        stopped = json.load(open(path))
+    elif saved:
+        stopped = json.load(open(saved[-1]))
+    else:
+        stopped = stop_from_logs(run_dir)
+    step = int(stopped.get('steps', 0)) if stopped else 0
     if step <= 0 or not os.path.exists(os.path.join(run_dir, 'models', f'actor_{step}.pt')):
         return None
     return stopped
+
+
+def stop_from_logs(run_dir):
+    """Rebuild the stop record from the last 'continued' event (runs continued before stopped_at_*.json existed)."""
+    path = os.path.join(run_dir, 'events.jsonl')
+    events = [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+    cont = [e for e in events if e.get('event') == 'continued']
+    if not cont:
+        return None
+    step = int(cont[-1]['from_step'])
+    before = [e for e in events if e['step'] <= step and e.get('event') != 'continued']
+    first = lambda name: next((e['step'] for e in before if e.get('event') == name), None)
+    rounds = [e for e in before if e.get('event') == 'rrm_update']
+    evals = [json.loads(l) for l in open(os.path.join(run_dir, 'eval.jsonl'))]
+    evals = [e for e in evals if e['step'] <= step]
+    hours = cont[-1].get('hours_before', evals[-1]['hours'] if evals else 0.0)
+    return dict(steps=step, labeled_feedback=rounds[-1]['labeled'] if rounds else 0, hours=hours,
+                first_success_step=first('first_success'), svm_on_step=first('svm_on'),
+                frm_refine_failures=sum(1 for e in before if e.get('event') == 'frm_refine_failed'),
+                continued_from=sorted({int(e['from_step']) for e in cont if int(e['from_step']) < step}))
 
 
 def main():
@@ -758,8 +815,10 @@ def main():
                      'label_frames.pkl', 'label_frames.tgz'):
             if os.path.exists(os.path.join(run_dir, name)):
                 os.remove(os.path.join(run_dir, name))
-        for name in ('vlm_output', 'vlm_label_set', 'models'):  # leftovers of an earlier attempt
+        for name in ('vlm_output', 'vlm_label_set', 'vlm_label_set_discarded', 'models'):  # leftovers of an earlier attempt
             shutil.rmtree(os.path.join(run_dir, name), ignore_errors=True)
+        for path in glob.glob(os.path.join(run_dir, 'stopped_at_*.json')):
+            os.remove(path)
     os.makedirs(run_dir, exist_ok=True)
     if stopped is None:
         with open(os.path.join(run_dir, 'config.json'), 'w') as f:
@@ -774,7 +833,10 @@ def main():
         run = Run(args, cfg, run_dir)
         if stopped is not None:
             run.continue_from(stopped)
-            os.remove(os.path.join(run_dir, 'incomplete.json'))
+            with open(os.path.join(run_dir, f"stopped_at_{int(stopped['steps'])}.json"), 'w') as f:
+                json.dump(stopped, f, indent=2)  # kept: if this attempt is killed, the next start continues from here
+            if os.path.exists(os.path.join(run_dir, 'incomplete.json')):
+                os.remove(os.path.join(run_dir, 'incomplete.json'))
         try:
             timed_out, reason = run.run(), None
         except DailyQuotaError as e:

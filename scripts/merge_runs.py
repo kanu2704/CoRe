@@ -13,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -29,12 +30,24 @@ def run_dirs(root):
 
 
 def stopped_step(d):
-    """Step a run stopped early at, if it can continue from there (incomplete.json + saved networks)."""
+    """Step a run can continue from, as train_kaggle.stopped_early() finds it (incomplete.json, or the
+    stop a continued-then-killed run started from), if its networks were saved there."""
+    if os.path.exists(os.path.join(d, 'done.json')):
+        return None
+    step = None
     try:
         step = int(json.load(open(os.path.join(d, 'incomplete.json')))['steps'])
     except (OSError, ValueError, KeyError):
-        return None
-    return step if os.path.exists(os.path.join(d, 'models', f'actor_{step}.pt')) else None
+        saved = [int(re.findall(r'\d+', os.path.basename(p))[0]) for p in glob.glob(os.path.join(d, 'stopped_at_*.json'))]
+        if saved:
+            step = max(saved)
+        else:
+            try:
+                cont = [json.loads(l) for l in open(os.path.join(d, 'events.jsonl')) if '"continued"' in l]
+                step = int(cont[-1]['from_step']) if cont else None
+            except (OSError, ValueError, KeyError):
+                step = None
+    return step if step and os.path.exists(os.path.join(d, 'models', f'actor_{step}.pt')) else None
 
 
 def main():
