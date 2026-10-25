@@ -22,6 +22,8 @@ class ReplayBuffer(object):
         self.rewards_rrm = np.empty((capacity, 1), np.float32)
         # per-step simulator success flag (used by success-based structural rewards)
         self.successes = np.zeros((capacity, 1), np.float32)
+        # fixed part of the structural reward that relabelling keeps (frm_svm: the FRM value)
+        self.bases = np.zeros((capacity, 1), np.float32)
 
         self.not_dones = np.empty((capacity, 1), dtype=np.float32)
         self.not_dones_no_max = np.empty((capacity, 1), dtype=np.float32)
@@ -38,7 +40,7 @@ class ReplayBuffer(object):
         return self.capacity if self.full else self.idx
 
     def add(self, obs, action, reward, reward_frm, reward_rrm,
-            next_obs, done, done_no_max, image=None, success=0.0):
+            next_obs, done, done_no_max, image=None, success=0.0, base=0.0):
         np.copyto(self.obses[self.idx], obs)
         np.copyto(self.actions[self.idx], action)
 
@@ -46,6 +48,7 @@ class ReplayBuffer(object):
         np.copyto(self.rewards_frm[self.idx], reward_frm)
         np.copyto(self.rewards_rrm[self.idx], reward_rrm)
         self.successes[self.idx] = success
+        self.bases[self.idx] = base
 
         np.copyto(self.next_obses[self.idx], next_obs)
         np.copyto(self.not_dones[self.idx], not done)
@@ -64,11 +67,11 @@ class ReplayBuffer(object):
 
     def relabel_structural(self, reward_fn):
         """Recompute the structural (FRM-slot) reward of every stored transition with a
-        vectorised reward_fn(obses, actions, successes) and refresh the total reward."""
+        vectorised reward_fn(obses, actions, successes, bases) and refresh the total reward."""
         n = self.idx if not self.full else self.capacity
         if n == 0:
             return
-        self.rewards_frm[:n, 0] = reward_fn(self.obses[:n], self.actions[:n], self.successes[:n, 0])
+        self.rewards_frm[:n, 0] = reward_fn(self.obses[:n], self.actions[:n], self.successes[:n, 0], self.bases[:n, 0])
         self.rewards[:n] = (1.0 - self.reward_alpha) * self.rewards_frm[:n] + self.reward_alpha * self.rewards_rrm[:n]
 
     def relabel_with_predictor(self, predictor, step):

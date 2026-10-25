@@ -7,7 +7,8 @@ Phase 1 - state only, no images, no API (runs on CPU sessions):
   frm          CoRe's saved LLM-written reward code            (paper rows: FRM)
   svm          success visitation matching, simulator labels   (ours)
   svm_sparse   svm + success reward (the SVM paper's full reward)
-  svm_seeded   svm whose discriminator starts with scripted successes (diagnostic only)
+  svm_seeded   svm whose discriminator starts with ~10 successful episodes of a trained policy (demonstrations)
+  frm_svm      CoRe's saved LLM-written reward + svm: CoRe with SVM in place of the VLM part
 
 Phase 2 - CoRe's protocol with rendered images and the image reward model (T4):
   core         CoRe re-run: FRM refined by the LLM + RRM     (paper row: CoRe)
@@ -62,9 +63,9 @@ def import_simulation_modules():
     from psvm.svm import SVMReward as _SVMReward
     utils, ReplayBuffer, Frame, SVMReward = _utils, _ReplayBuffer, _Frame, _SVMReward
 
-PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded']
+PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm']
 PHASE2_MODES = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm', 'rrm_psvm']
-SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm']
+SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm', 'frm_svm']
 TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2',
          'soccer-v2', 'sweep-into-v2', 'drawer-open-v2', 'dial-turn-v2']
 
@@ -178,7 +179,8 @@ class Run:
 
         # the reward that fills CoRe's formal-reward slot
         self.frm, self.frm_gen = None, None
-        if self.mode in ('frm', 'core'):
+        self.last_frm = 0.0  # frm_svm: this step's FRM value, kept in the replay buffer when the SVM relabels
+        if self.mode in ('frm', 'core', 'frm_svm'):
             self.frm, frm_path = load_frm(self.task)
             if self.mode == 'core' and args.llm_refine:
                 from FRM.reward_code import FRMCode
@@ -240,6 +242,10 @@ class Run:
         if m in ('frm', 'core'):
             r, info = self.frm(next_obs, action, target_pos(self.env))
             return float(np.clip(r, -1, 1)), info
+        if m == 'frm_svm':
+            r, info = self.frm(next_obs, action, target_pos(self.env))
+            self.last_frm = float(np.clip(r, -1, 1))
+            return self.last_frm + self.svm.reward(obs, action), info
         if m in SVM_MODES:
             r = self.svm.reward(obs, action)
             return r + (float(success) if m == 'svm_sparse' else 0.0), None
@@ -253,9 +259,11 @@ class Run:
         q = self.judge.grade(frames)
         return 0.0 if q is None else q  # no usable answer: count it as a failure
 
-    def svm_relabel_fn(self, obses, actions, successes):
+    def svm_relabel_fn(self, obses, actions, successes, bases):
         r = self.svm.reward_batch(obses, actions)
-        return r + successes if self.mode == 'svm_sparse' else r
+        if self.mode == 'svm_sparse':
+            return r + successes
+        return r + bases if self.mode == 'frm_svm' else r
 
     def seed_svm(self, n_episodes):
         """svm_seeded: give the discriminator successful episodes before training, from a trained
@@ -267,7 +275,7 @@ class Run:
                                 [float(env.action_space.low.min()), float(env.action_space.high.max())], self.device)
             helper.actor.load_state_dict(torch.load(self.args.seed_actor, map_location=self.device))
             helper.train(False)
-            get_action = lambda o: helper.act(o, sample=False)
+            get_action = lambda o: helper.act(o, sample=True)  # sampled: CoRe's fixed start would make greedy demos identical
             source = self.args.seed_actor
         else:
             scripted = scripted_policy(self.task)
@@ -462,7 +470,7 @@ class Run:
             reward_hat = (1.0 - self.alpha) * r_struct + self.alpha * r_rrm
 
             self.replay.add(obs, action, reward_hat, r_struct, r_rrm, next_obs, done_f, done_no_max,
-                            image=frame if self.store_images else None, success=success)
+                            image=frame if self.store_images else None, success=success, base=self.last_frm)
             if self.phase2 and self.total_feedback < cfg['max_feedback']:
                 self.RRM.add_data(obs, action, env_reward, done_f, img=frame)
 

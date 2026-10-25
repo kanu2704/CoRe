@@ -8,6 +8,8 @@ HARD_TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2']
 
 PHASE1_MAIN = ['env_dense', 'env_sparse', 'frm', 'svm']          # A1-A4
 PHASE1_EXTRA = ['svm_sparse', 'svm_seeded']                       # A5, A6
+# proposal v2: CoRe's LLM reward + SVM instead of the VLM part (A7), and SVM given demonstrations (A6)
+V2_RUNS = [('frm_svm', t) for t in HARD_TASKS] + [('svm_seeded', 'peg-insert-side-v2'), ('svm_seeded', 'button-press-topdown-v2')]
 PHASE2_MAIN = ['rrm_svm', 'rrm_only', 'core']                     # B4 (the proposal) first, then B2, B1
 PHASE2_CONTROL = ['rrm_sparse']                                   # B3
 
@@ -20,6 +22,7 @@ PLANS = {
     # Phase 1: state-only, CPU is enough (no GPU quota, no API)
     'phase1': runs(PHASE1_MAIN, HARD_TASKS, range(5)),
     'phase1_extra': runs(PHASE1_EXTRA, HARD_TASKS, range(5)),
+    'v2': [(m, t, s) for s in range(3) for m, t in V2_RUNS],
     # Phase 2: one task at a time; the GPU budget decides how far you get
     'phase2_peg': runs(PHASE2_MAIN, ['peg-insert-side-v2'], range(3)),
     'phase2_peg_control': runs(PHASE2_CONTROL, ['peg-insert-side-v2'], range(3)),
