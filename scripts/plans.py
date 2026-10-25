@@ -23,6 +23,8 @@ PLANS = {
     'phase1': runs(PHASE1_MAIN, HARD_TASKS, range(5)),
     'phase1_extra': runs(PHASE1_EXTRA, HARD_TASKS, range(5)),
     'v2': [(m, t, s) for s in range(3) for m, t in V2_RUNS],
+    # CoRe re-runs to compare v2 with in our own setup (same VLM, same code): Hammer and Button, seed by seed
+    'core_more': runs(['core'], ['hammer-v2', 'button-press-topdown-v2'], range(3)),
     # Phase 2: one task at a time; the GPU budget decides how far you get
     'phase2_peg': runs(PHASE2_MAIN, ['peg-insert-side-v2'], range(3)),
     'phase2_peg_control': runs(PHASE2_CONTROL, ['peg-insert-side-v2'], range(3)),
