@@ -68,6 +68,9 @@ def import_simulation_modules():
 
 PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm', 'frm_sparse', 'frm_psvm']
 JUDGED_MODES = ['rrm_psvm', 'frm_psvm']  # SVM success weights graded by the VLM instead of the simulator
+# frm_psvm's judging style per task: the one with fewer false 'success' calls for Gemini Flash-Lite on the judge
+# test set (scripts/judge_eval.py): yes/no 0% on Button and Peg, the stage checklist 5.6% (vs 30%) on Hammer
+FRM_PSVM_STYLE = {'hammer-v2': 'stages'}
 PHASE2_MODES = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm', 'rrm_psvm']
 SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm', 'frm_svm', 'frm_psvm']
 TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2',
@@ -84,6 +87,8 @@ DEFAULTS = dict(
     # success visitation matching (ours)
     svm_hidden=256, svm_depth=2, svm_lr=3e-4, svm_batch=512, svm_steps=50, svm_min_effective=5.0,
     svm_clip=1.0, svm_scale=1.0, svm_seed_episodes=10,
+    # frm_psvm: ask the VLM only about the top judge_top of attempts by FRM return (among the last judge_window)
+    judge_top=0.15, judge_window=50,
 )
 
 
@@ -210,7 +215,10 @@ class Run:
         self.judge = None
         if self.mode in JUDGED_MODES and args.success_judge == 'vlm':
             from psvm.judge import SuccessJudge
-            self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR, style=args.judge_style)
+            style = args.judge_style or (FRM_PSVM_STYLE.get(self.task, 'success') if self.mode == 'frm_psvm' else 'stages')
+            self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR, style=style)
+        self.frm_returns = deque(maxlen=int(cfg['judge_window']))  # frm_psvm: recent episodes' FRM returns
+        self.ep_frm, self.judge_asked = 0.0, None
         self.ep_frames = []  # rrm_psvm: frames at 1/2, 3/4 and the end of the episode, for the judge
 
         self.step = 0
@@ -259,12 +267,22 @@ class Run:
         return 0.0, None  # rrm_only
 
     def success_weight(self, frames, success, true_return, max_steps):
-        """rrm_psvm: the episode's success weight q, graded by the VLM from frames of the episode
-        (--success_judge scripted: a dense-reward progress proxy, for testing without a VLM)."""
+        """The episode's success weight q, graded by the VLM from frames of the episode
+        (--success_judge scripted: a dense-reward progress proxy, for testing without a VLM).
+        frm_psvm asks only about the most promising attempts (top judge_top by FRM return; the
+        rest count as failures without a question) and uses the judge's call as a 0/1 label."""
+        if self.mode == 'frm_psvm':
+            past = list(self.frm_returns)
+            self.frm_returns.append(self.ep_frm)
+            self.judge_asked = bool(len(past) >= 10 and self.ep_frm >= np.quantile(past, 1.0 - self.cfg['judge_top']))
+            if not self.judge_asked:
+                return 0.0
         if self.judge is None:
             return float(np.clip(true_return / (10.0 * max_steps), 0.0, 1.0)) if not success else 1.0
         q = self.judge.grade(frames)
-        return 0.0 if q is None else q  # no usable answer: count it as a failure
+        if q is None:
+            return 0.0  # no usable answer: count it as a failure
+        return (1.0 if q >= 1.0 else 0.0) if self.mode == 'frm_psvm' else q
 
     def svm_relabel_fn(self, obses, actions, successes, bases):
         r = self.svm.reward_batch(obses, actions)
@@ -394,6 +412,7 @@ class Run:
                                svm_ready=bool(self.svm.ready) if self.svm else None,
                                labeled_feedback=self.labeled_feedback,
                                **({'q': q} if self.mode in JUDGED_MODES else {}),
+                               **({'asked': self.judge_asked} if self.mode == 'frm_psvm' else {}),
                                **({k: v for k, v in self.svm.last.items()} if svm_changed else {}))
                     avg_train_true_return.append(ep_true)
 
@@ -410,6 +429,7 @@ class Run:
                     self.frm_gen.target_pos = target_pos(self.env)
                 done = False
                 ep_ret = ep_true = ep_struct = ep_rrm = ep_succ = 0.0
+                self.ep_frm = 0.0
                 ep_obs, ep_act, step_frm_dict = [], [], []
                 episode_step = 0
                 self.ep_frames = []
@@ -489,6 +509,7 @@ class Run:
             ep_ret += reward_hat
             ep_true += env_reward
             ep_struct += (1.0 - self.alpha) * r_struct
+            self.ep_frm += self.last_frm
             ep_rrm += self.alpha * r_rrm
             ep_succ = max(ep_succ, success)
 
@@ -837,7 +858,7 @@ def main():
     p.add_argument('--save_label_images', action='store_true', help="keep images in saved label files (large)")
     p.add_argument('--success_judge', default='vlm', choices=['vlm', 'scripted'],
                    help="rrm_psvm: grade episodes with the VLM, or a dense-reward proxy (testing only)")
-    p.add_argument('--judge_style', default='stages', choices=['stages', 'success', 'scale'],
+    p.add_argument('--judge_style', default=None, choices=['stages', 'success', 'scale'],
                    help="rrm_psvm: furthest stage of a task checklist over 3 frames, or a 0-10 grade of the final frame")
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")

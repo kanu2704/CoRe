@@ -25,6 +25,8 @@ PLANS = {
     'v2': [(m, t, s) for s in range(3) for m, t in V2_RUNS],
     # control for v2: the LLM reward + the success bit itself, no SVM
     'control': runs(['frm_sparse'], HARD_TASKS, range(3)),
+    # v2 without ground truth: FRM + SVM, success labels from the VLM (Gemini) instead of the simulator
+    'gt_free': runs(['frm_psvm'], HARD_TASKS, range(1)),
     # CoRe re-runs to compare v2 with in our own setup (same VLM, same code): Hammer and Button, seed by seed
     'core_more': runs(['core'], ['hammer-v2', 'button-press-topdown-v2'], range(3)),
     # Phase 2: one task at a time; the GPU budget decides how far you get
