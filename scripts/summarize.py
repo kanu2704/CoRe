@@ -34,10 +34,11 @@ LABELS = {
     'env_dense': 'A1 Env Dense', 'env_sparse': 'A2 Env Sparse', 'frm': 'A3 FRM only', 'svm': 'A4 Oracle SVM',
     'svm_sparse': 'A5 SVM + sparse', 'svm_seeded': 'A6 SVM + demonstrations',
     'frm_svm': 'A7 FRM + SVM (CoRe without VLM)',
+    'frm_sparse': 'A8 FRM + success bit (control)',
     'core': 'B1 CoRe re-run', 'rrm_only': 'B2 RRM only', 'rrm_sparse': 'B3 RRM + success', 'rrm_svm': 'B4 RRM + oracle SVM',
     'rrm_psvm': 'B5 RRM + P-SVM (VLM-graded q)',
 }
-PHASE1 = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm']
+PHASE1 = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm', 'frm_sparse']
 PHASE2 = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm', 'rrm_psvm']
 
 

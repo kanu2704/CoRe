@@ -9,6 +9,9 @@ Phase 1 - state only, no images, no API (runs on CPU sessions):
   svm_sparse   svm + success reward (the SVM paper's full reward)
   svm_seeded   svm whose discriminator starts with ~10 successful episodes of a trained policy (demonstrations)
   frm_svm      CoRe's saved LLM-written reward + svm: CoRe with SVM in place of the VLM part
+  frm_sparse   CoRe's saved LLM-written reward + success bit (control: is SVM more than the success bit?)
+  frm_psvm     frm_svm with no ground truth: the SVM's success weights come from the VLM judging 3 frames
+               of each episode (only those frames are rendered)
 
 Phase 2 - CoRe's protocol with rendered images and the image reward model (T4):
   core         CoRe re-run: FRM refined by the LLM + RRM     (paper row: CoRe)
@@ -63,9 +66,10 @@ def import_simulation_modules():
     from psvm.svm import SVMReward as _SVMReward
     utils, ReplayBuffer, Frame, SVMReward = _utils, _ReplayBuffer, _Frame, _SVMReward
 
-PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm']
+PHASE1_MODES = ['env_dense', 'env_sparse', 'frm', 'svm', 'svm_sparse', 'svm_seeded', 'frm_svm', 'frm_sparse', 'frm_psvm']
+JUDGED_MODES = ['rrm_psvm', 'frm_psvm']  # SVM success weights graded by the VLM instead of the simulator
 PHASE2_MODES = ['core', 'rrm_only', 'rrm_sparse', 'rrm_svm', 'rrm_psvm']
-SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm', 'frm_svm']
+SVM_MODES = ['svm', 'svm_sparse', 'svm_seeded', 'rrm_svm', 'rrm_psvm', 'frm_svm', 'frm_psvm']
 TASKS = ['peg-insert-side-v2', 'hammer-v2', 'button-press-topdown-v2',
          'soccer-v2', 'sweep-into-v2', 'drawer-open-v2', 'dial-turn-v2']
 
@@ -180,7 +184,7 @@ class Run:
         # the reward that fills CoRe's formal-reward slot
         self.frm, self.frm_gen = None, None
         self.last_frm = 0.0  # frm_svm: this step's FRM value, kept in the replay buffer when the SVM relabels
-        if self.mode in ('frm', 'core', 'frm_svm'):
+        if self.mode in ('frm', 'core', 'frm_svm', 'frm_sparse', 'frm_psvm'):
             self.frm, frm_path = load_frm(self.task)
             if self.mode == 'core' and args.llm_refine:
                 from FRM.reward_code import FRMCode
@@ -204,7 +208,7 @@ class Run:
             if self.mode == 'svm_seeded':
                 self.seed_svm(cfg['svm_seed_episodes'])
         self.judge = None
-        if self.mode == 'rrm_psvm' and args.success_judge == 'vlm':
+        if self.mode in JUDGED_MODES and args.success_judge == 'vlm':
             from psvm.judge import SuccessJudge
             self.judge = SuccessJudge(f'metaworld_{self.task}', PROJECT_DIR, style=args.judge_style)
         self.ep_frames = []  # rrm_psvm: frames at 1/2, 3/4 and the end of the episode, for the judge
@@ -242,7 +246,10 @@ class Run:
         if m in ('frm', 'core'):
             r, info = self.frm(next_obs, action, target_pos(self.env))
             return float(np.clip(r, -1, 1)), info
-        if m == 'frm_svm':
+        if m == 'frm_sparse':
+            r, info = self.frm(next_obs, action, target_pos(self.env))
+            return float(np.clip(r, -1, 1)) + float(success), info
+        if m in ('frm_svm', 'frm_psvm'):
             r, info = self.frm(next_obs, action, target_pos(self.env))
             self.last_frm = float(np.clip(r, -1, 1))
             return self.last_frm + self.svm.reward(obs, action), info
@@ -263,7 +270,7 @@ class Run:
         r = self.svm.reward_batch(obses, actions)
         if self.mode == 'svm_sparse':
             return r + successes
-        return r + bases if self.mode == 'frm_svm' else r
+        return r + bases if self.mode in ('frm_svm', 'frm_psvm') else r
 
     def seed_svm(self, n_episodes):
         """svm_seeded: give the discriminator successful episodes before training, from a trained
@@ -369,7 +376,7 @@ class Run:
                         self.first_success_step = self.step
                         self.write('events', step=self.step, event='first_success')
                     svm_changed = False
-                    q = ep_succ if self.mode != 'rrm_psvm' else self.success_weight(
+                    q = ep_succ if self.mode not in JUDGED_MODES else self.success_weight(
                         self.ep_frames or [rgb], ep_succ, ep_true, max_steps)
                     if self.svm is not None:
                         self.svm.add_episode(np.array(ep_obs), np.array(ep_act), q=q, y=ep_succ)
@@ -386,7 +393,7 @@ class Run:
                                reward_return=ep_ret, struct_return=ep_struct, rrm_return=ep_rrm,
                                svm_ready=bool(self.svm.ready) if self.svm else None,
                                labeled_feedback=self.labeled_feedback,
-                               **({'q': q} if self.mode == 'rrm_psvm' else {}),
+                               **({'q': q} if self.mode in JUDGED_MODES else {}),
                                **({k: v for k, v in self.svm.last.items()} if svm_changed else {}))
                     avg_train_true_return.append(ep_true)
 
@@ -460,6 +467,9 @@ class Run:
                     self.ep_frames.append(rgb)
                 if self.step >= warmup:
                     r_rrm = self.rrm_reward(rgb)
+            elif self.mode == 'frm_psvm' and (episode_step + 1) in (max_steps // 2, 3 * max_steps // 4, max_steps):
+                # state-only training: render just the frames the judge sees
+                self.ep_frames.append(render_frame(self.env, self.task, cfg['image_size']))
 
             r_struct, frm_info = self.structural_reward(obs, action, next_obs, env_reward, success)
             if frm_info is not None:
@@ -827,7 +837,7 @@ def main():
     p.add_argument('--save_label_images', action='store_true', help="keep images in saved label files (large)")
     p.add_argument('--success_judge', default='vlm', choices=['vlm', 'scripted'],
                    help="rrm_psvm: grade episodes with the VLM, or a dense-reward proxy (testing only)")
-    p.add_argument('--judge_style', default='stages', choices=['stages', 'scale'],
+    p.add_argument('--judge_style', default='stages', choices=['stages', 'success', 'scale'],
                    help="rrm_psvm: furthest stage of a task checklist over 3 frames, or a 0-10 grade of the final frame")
     p.add_argument('--seed_actor', default='', help="svm_seeded: actor .pt of a trained policy that solves the task")
     p.add_argument('--time_limit_hours', type=float, default=0, help="stop early (run marked incomplete)")
@@ -850,7 +860,7 @@ def main():
         args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if args.threads:
         torch.set_num_threads(args.threads)
-    if args.mode in PHASE2_MODES:
+    if args.mode in PHASE2_MODES or args.mode == 'frm_psvm':
         # headless GPU rendering on Linux (Kaggle); macOS needs MUJOCO_GL=glfw
         os.environ.setdefault('MUJOCO_GL', 'egl' if sys.platform.startswith('linux') else 'glfw')
         if os.environ['MUJOCO_GL'] in ('egl', 'osmesa'):

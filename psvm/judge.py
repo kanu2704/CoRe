@@ -6,9 +6,10 @@ q in [0, 1] is the episode's success weight in the SVM: positives are sampled in
 to q, negatives to 1 - q. Near-misses get partial credit, so the SVM can switch on before
 the first real success, which is where the oracle-label SVM (rrm_svm) gets stuck.
 
-Two grading styles:
+Grading styles:
   stages  (default) three frames of the attempt and a checklist of the task's stages; the
           VLM names the furthest stage reached and q = stage / 4
+  success the same three frames; the VLM answers whether the task was completed, q = 1 or 0
   scale   the final frame only, graded 0-10 (q = grade / 10). On Peg Insert Qwen-4B gave 0
           to every attempt that had not finished the task, so it never gave partial credit.
 """
@@ -32,6 +33,17 @@ STAGES_PROMPT = ("The task is {task}. The first image shows the task not started
                  "The robot arm is invisible in all images, so judge only by where the objects are. "
                  "Which is the furthest stage the attempt reached in any of these frames?\n{stages}\n"
                  "Answer with a single integer from 0 to 4.")
+
+SUCCESS_PROMPT = ("The task is {task}. The first image shows the task not started at all, and the second image "
+                  "shows the task completely done. The next {n} images are frames from one attempt, in time order; "
+                  "the last one is the end of the attempt. The robot arm is invisible in all images, so judge only "
+                  "by where the objects are. Was the task completed, as in the second image? Answer with one word: yes or no.")
+
+
+def parse_yes_no(text):
+    m = re.search(r'\b(yes|no)\b', (text or '').lower())
+    return None if m is None else (1 if m.group(1) == 'yes' else 0)
+
 
 # what each stage looks like, per task (stage 4 = done). CoRe renders the robot arm transparent,
 # so the stages describe only the objects.
@@ -83,11 +95,14 @@ class SuccessJudge:
             cv2.COLOR_BGR2RGB), (300, 300)))
         self.init_image, self.done_image = image('init'), image('done')
         self.calls = self.failures = 0
+        self.last_answer = None
 
     def messages(self, frames):
         url = lambda b64: {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{b64}'}}
         if self.style == 'scale':
             text, frames = SCALE_PROMPT.format(task=self.task), frames[-1:]
+        elif self.style == 'success':
+            text = SUCCESS_PROMPT.format(task=self.task, n=len(frames))
         else:
             text = STAGES_PROMPT.format(task=self.task, n=len(frames), stages=self.stages)
         return [{'role': 'user', 'content': [{'type': 'text', 'text': text}, url(self.init_image), url(self.done_image)]
@@ -96,7 +111,7 @@ class SuccessJudge:
     def grade(self, frames):
         """q in [0, 1] for an attempt shown by `frames` (RGB uint8, time order, the last one final),
         or None if the VLM gave no usable answer."""
-        top = 10 if self.style == 'scale' else 4
+        top = {'scale': 10, 'stages': 4, 'success': 1}[self.style]
         messages = self.messages(frames)
         self.calls += 1
         for attempt in range(6):
@@ -104,7 +119,9 @@ class SuccessJudge:
                 pace('vlm')
                 r = self.client.chat.completions.create(model=self.model, messages=messages,
                                                         temperature=0, max_tokens=16)
-                g = parse_grade(r.choices[0].message.content, top)
+                text = r.choices[0].message.content
+                self.last_answer = text
+                g = parse_yes_no(text) if self.style == 'success' else parse_grade(text, top)
                 if g is not None:
                     return g / top
             except Exception as e:
